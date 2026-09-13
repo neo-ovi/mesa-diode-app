@@ -6,8 +6,8 @@
   - логарифмическая шкала ёмкости на графике ВФХ (оценка резкости перехода);
   - отдельное окно «Формулы и параметры» (см. simulator/formulas.py);
   - подробные комментарии в местах, отвечающих за отрисовку/масштаб/расположение —
-    см. блоки "### ЗДЕСЬ ... ###" внутри методов _plot_iv, _plot_cv, _plot_mesa,
-    _build_input_row.
+    см. блоки "### ЗДЕСЬ ... ###" внутри методов _plot_iv, _plot_cv, _build_input_row;
+    схема мезы вынесена в simulator/diagram.py (draw_mesa_diagram).
 
 Запуск:        python scripts/run_simulator.py
 Сборка в exe:  см. mesa_diode/simulator/README.md
@@ -21,13 +21,13 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.patches import Rectangle, Polygon
 
 from mesa_diode.simulator.physics import (
     MesaParams, auto_scale, capacitance, estimate_grading_m, solve_iv,
 )
 from mesa_diode.simulator.formulas import build_formulas_text
 from mesa_diode.simulator.io import load_xy_file
+from mesa_diode.simulator.diagram import draw_mesa_diagram
 
 PARAM_SPECS = [
     # (ключ, обозначение, единицы, значение_по_умолчанию)
@@ -340,85 +340,7 @@ class MesaApp(tk.Tk):
     def _plot_mesa(self, p):
         ax = self.ax_mesa
         ax.clear()
-
-        # ### ЗДЕСЬ задаётся СИСТЕМА КООРДИНАТ схемы (условные единицы, не мкм) ###
-        # Все x,y ниже — это условные координаты холста 10x5, а НЕ реальные
-        # микрометры. Именно поэтому при изменении размера окна текст может
-        # визуально "наезжать": aspect="equal" фиксирует пропорции рисунка,
-        # но абсолютный размер шрифта (fontsize=...) в пунктах не масштабируется
-        # вместе с холстом. Если после сборки текст перекрывается:
-        #   - уменьшите fontsize у соответствующего ax.text(...) ниже, ЛИБО
-        #   - увеличьте разницу между y-координатами конфликтующих подписей,
-        #     ЛИБО
-        #   - зафиксируйте физический размер окна (self.geometry(...) в __init__)
-        #     и уберите растягивание canvas (pack(..., expand=False)).
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 5)
-        ax.set_aspect("equal")
-        ax.axis("off")
-        ax.set_title(
-            "Схема мезы (условно, не в масштабе): "
-            "D — диаметр, h — глубина, N_D — доноры (Si), N_A — акцепторы (Ge)",
-            fontsize=9)
-
-        # --- нижний контакт --- (позиция/размер: Rectangle((x, y), width, height))
-        ax.add_patch(Rectangle((2.0, 0.3), 6.0, 0.35, facecolor="#8a8a8a",
-                                edgecolor="black", linewidth=1))
-        ax.text(5.0, 0.475, "нижний контакт (металл)", ha="center", va="center",
-                fontsize=7, color="white")
-
-        # --- подложка Si ---
-        ax.add_patch(Rectangle((1.0, 0.65), 8.0, 1.1, facecolor="#cfe3f7",
-                                edgecolor="black", linewidth=1))
-        ax.text(5.0, 1.2, "Si, N_D", ha="center", va="center", fontsize=9)
-
-        # --- меза Ge (трапеция) --- меняйте mesa_bottom_y / mesa_h / x_l / x_r / taper,
-        # чтобы изменить положение и форму мезы на схеме
-        mesa_bottom_y = 1.75
-        mesa_h = 1.6
-        x_l, x_r = 3.6, 6.4
-        taper = 0.35
-        mesa = Polygon([
-            (x_l, mesa_bottom_y),
-            (x_r, mesa_bottom_y),
-            (x_r - taper, mesa_bottom_y + mesa_h),
-            (x_l + taper, mesa_bottom_y + mesa_h),
-        ], closed=True, facecolor="#d9c2a3", edgecolor="black", linewidth=1)
-        ax.add_patch(mesa)
-        ax.text(5.0, mesa_bottom_y + mesa_h / 2, "Ge, N_A", ha="center",
-                va="center", fontsize=9)
-
-        # --- верхний контакт ---
-        top_y = mesa_bottom_y + mesa_h
-        ax.add_patch(Rectangle((4.3, top_y), 1.4, 0.3, facecolor="#8a8a8a",
-                                edgecolor="black", linewidth=1))
-        ax.text(5.0, top_y + 0.15, "верхний контакт", ha="center", va="center",
-                fontsize=7, color="white")
-
-        # --- стрелка диаметра D --- (y_arrow регулирует высоту расположения стрелки
-        # ПОД мезой; если она наезжает на подпись "Si, N_D" — увеличьте отступ 0.35)
-        y_arrow = mesa_bottom_y - 0.35
-        ax.annotate("", xy=(x_r, y_arrow), xytext=(x_l, y_arrow),
-                    arrowprops=dict(arrowstyle="<->", color="black", linewidth=1.2))
-        ax.text(5.0, y_arrow - 0.25, f"D = {p.D_um:g} мкм", ha="center",
-                fontsize=9, fontweight="bold")
-
-        # --- стрелка глубины h --- (x_arrow регулирует, насколько правее мезы
-        # рисуется стрелка; если она наезжает на текст справа — увеличьте отступ 0.5)
-        x_arrow = x_r + 0.5
-        ax.annotate("", xy=(x_arrow, top_y), xytext=(x_arrow, mesa_bottom_y),
-                    arrowprops=dict(arrowstyle="<->", color="black", linewidth=1.2))
-        ax.text(x_arrow + 0.15, mesa_bottom_y + mesa_h / 2,
-                f"h = {p.h_um:g} мкм", ha="left", va="center",
-                fontsize=9, fontweight="bold", rotation=90)
-
-        # --- подписи концентраций справа --- (x=9.6 держит блок у правого края;
-        # если он "вылезает" за пределы холста — уменьшите либо x, либо fontsize)
-        info = (f"N_D = {p.ND:.2e} см⁻³\n"
-                f"N_A = {p.NA:.2e} см⁻³\n"
-                f"T = {p.T:g} К")
-        ax.text(9.6, 2.5, info, ha="right", va="center", fontsize=8,
-                bbox=dict(boxstyle="round", facecolor="#f5f5f5", edgecolor="#999999"))
+        draw_mesa_diagram(ax, p)
 
 
 def main():

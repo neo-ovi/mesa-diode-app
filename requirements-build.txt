@@ -1,0 +1,4 @@
+# Зависимости, нужные только для сборки .exe (см. mesa_diode/simulator/README.md).
+# Обычная работа с кодом (тесты, подгонка модели) их не требует.
+-r requirements.txt
+pyinstaller>=6.3

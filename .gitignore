@@ -88,6 +88,8 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# Исключение: наш собственный spec-файл сборки симулятора коммитится
+!packaging/mesa_simulator.spec
 
 # Installer logs
 pip-log.txt

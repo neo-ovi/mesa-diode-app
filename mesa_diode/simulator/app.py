@@ -2,7 +2,8 @@
 """Графический интерфейс симулятора мезоструктуры Ge/Si — ВАХ и ВФХ.
 
 Версия 2. Возможности:
-  - загрузка экспериментальных данных ВАХ и ВФХ из файла для сравнения с моделью;
+  - загрузка экспериментальных данных ВАХ и ВФХ из нескольких файлов сразу
+    (до simulator.style.MAX_DATASETS штук на график) для сравнения с моделью;
   - логарифмическая шкала ёмкости на графике ВФХ (оценка резкости перехода);
   - отдельное окно «Формулы и параметры» (см. simulator/formulas.py);
   - подробные комментарии в местах, отвечающих за отрисовку/масштаб/расположение —
@@ -12,6 +13,8 @@
 Запуск:        python scripts/run_simulator.py
 Сборка в exe:  см. mesa_diode/simulator/README.md
 """
+
+from pathlib import Path
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
@@ -28,6 +31,7 @@ from mesa_diode.simulator.physics import (
 from mesa_diode.simulator.formulas import build_formulas_text
 from mesa_diode.simulator.io import load_xy_file
 from mesa_diode.simulator.diagram import draw_mesa_diagram
+from mesa_diode.simulator.style import MAX_DATASETS, dataset_style, remaining_slots
 
 PARAM_SPECS = [
     # (ключ, обозначение, единицы, значение_по_умолчанию)
@@ -49,9 +53,10 @@ class MesaApp(tk.Tk):
         self.geometry("1500x980")
         self.minsize(1200, 820)
 
-        # Экспериментальные данные, загруженные из файла: None либо (V, Y) массивы
-        self.exp_iv = None
-        self.exp_cv = None
+        # Экспериментальные данные, загруженные из файлов — до MAX_DATASETS
+        # штук на каждый график. Каждый элемент: {"label", "voltage", "value"}
+        self.exp_iv = []
+        self.exp_cv = []
 
         self._build_menu()
         self._build_figure_area()
@@ -185,37 +190,48 @@ class MesaApp(tk.Tk):
         ttk.Button(win, text="Закрыть", command=win.destroy).pack(side="bottom", pady=(0, 8))
 
     # ---------------- загрузка/очистка экспериментальных данных ----------------
-    def load_experimental_iv(self):
-        path = filedialog.askopenfilename(
-            title="Выберите файл экспериментальной ВАХ (V, I)",
+    def _load_experimental_files(self, dialog_title, target_list, error_title):
+        """Общая логика загрузки для ВАХ и ВФХ: несколько файлов за раз,
+        до MAX_DATASETS штук суммарно на график (см. simulator/style.py)."""
+        paths = filedialog.askopenfilenames(
+            title=dialog_title,
             filetypes=[("Текст/CSV", "*.csv;*.txt;*.dat"), ("Все файлы", "*.*")])
-        if not path:
+        if not paths:
             return
-        try:
-            V, I = load_xy_file(path)
-        except Exception as e:
-            messagebox.showerror("Ошибка загрузки ВАХ", str(e))
-            return
-        self.exp_iv = (V, I)
+
+        slots = remaining_slots(len(target_list))
+        accepted, rejected = paths[:slots], paths[slots:]
+
+        for path in accepted:
+            try:
+                voltage, value = load_xy_file(path)
+            except Exception as e:
+                messagebox.showerror(error_title, f"{Path(path).name}: {e}")
+                continue
+            target_list.append({"label": Path(path).name, "voltage": voltage, "value": value})
+
+        if rejected:
+            messagebox.showwarning(
+                "Достигнут лимит наборов данных",
+                f"Загружено {len(accepted)} из {len(paths)} файлов — уже "
+                f"на графике максимум {MAX_DATASETS} наборов. Остальные "
+                f"{len(rejected)} не загружены. Уберите лишние через "
+                f"«Очистить эксперим. данные» и загрузите заново."
+            )
+
         self.recompute()
+
+    def load_experimental_iv(self):
+        self._load_experimental_files(
+            "Выберите файлы экспериментальной ВАХ (V, I)", self.exp_iv, "Ошибка загрузки ВАХ")
 
     def load_experimental_cv(self):
-        path = filedialog.askopenfilename(
-            title="Выберите файл экспериментальной ВФХ (V, C)",
-            filetypes=[("Текст/CSV", "*.csv;*.txt;*.dat"), ("Все файлы", "*.*")])
-        if not path:
-            return
-        try:
-            V, C = load_xy_file(path)
-        except Exception as e:
-            messagebox.showerror("Ошибка загрузки ВФХ", str(e))
-            return
-        self.exp_cv = (V, C)
-        self.recompute()
+        self._load_experimental_files(
+            "Выберите файлы экспериментальной ВФХ (V, C)", self.exp_cv, "Ошибка загрузки ВФХ")
 
     def clear_experimental(self):
-        self.exp_iv = None
-        self.exp_cv = None
+        self.exp_iv = []
+        self.exp_cv = []
         self.recompute()
 
     # ---------------- чтение и валидация введённых значений ----------------
@@ -280,17 +296,19 @@ class MesaApp(tk.Tk):
         # ### ЗДЕСЬ задаётся МАСШТАБ отображения тока (авто-приставка А/мА/мкА/нА) ###
         # Если нужен фиксированный масштаб — замените вызов auto_scale(...)
         # на конкретную пару, например: factor, unit = 1e3, "мА"
-        combo = I if self.exp_iv is None else np.concatenate([I, self.exp_iv[1]])
+        combo = np.concatenate([I] + [d["value"] for d in self.exp_iv])
         factor, unit = auto_scale(combo, "А")
 
         # ### ЗДЕСЬ задаётся сама КРИВАЯ МОДЕЛИ ВАХ ###
         ax.plot(V, I * factor, color="#1f6fb2", linewidth=1.8, label="модель")
 
         # ### ЗДЕСЬ добавляются ЭКСПЕРИМЕНТАЛЬНЫЕ точки ВАХ (если загружены) ###
-        if self.exp_iv is not None:
-            Vexp, Iexp = self.exp_iv
-            ax.plot(Vexp, Iexp * factor, "o", ms=4, color="#d62728",
-                    markerfacecolor="none", label="эксперимент")
+        # У каждого набора — свой маркер и цвет (simulator/style.py), в
+        # легенде — имя файла, чтобы несколько кривых были различимы.
+        for index, dataset in enumerate(self.exp_iv):
+            marker, color = dataset_style(index)
+            ax.plot(dataset["voltage"], dataset["value"] * factor, marker, ms=5,
+                    color=color, markerfacecolor="none", label=dataset["label"])
 
         ax.axhline(0, color="#999999", linewidth=0.7)
         ax.axvline(0, color="#999999", linewidth=0.7)
@@ -298,7 +316,7 @@ class MesaApp(tk.Tk):
         ax.set_xlabel("Напряжение V, В")
         ax.set_ylabel(f"Ток I, {unit}")
         ax.grid(True, linewidth=0.4, alpha=0.6)
-        if self.exp_iv is not None:
+        if self.exp_iv:
             ax.legend(fontsize=8, loc="best")
 
     # ---------------- отрисовка ВФХ ----------------
@@ -307,18 +325,20 @@ class MesaApp(tk.Tk):
         ax.clear()
 
         C_safe = np.nan_to_num(C, nan=0.0)
-        combo = C_safe if self.exp_cv is None else np.concatenate([C_safe, self.exp_cv[1]])
+        combo = np.concatenate([C_safe] + [d["value"] for d in self.exp_cv])
         factor, unit = auto_scale(combo, "Ф")
 
         # ### ЗДЕСЬ задаётся сама КРИВАЯ МОДЕЛИ ВФХ ###
         ax.plot(V, C * factor, color="#b2401f", linewidth=1.8, label="модель")
 
         # ### ЗДЕСЬ добавляются ЭКСПЕРИМЕНТАЛЬНЫЕ точки ВФХ (если загружены) ###
-        if self.exp_cv is not None:
-            Vexp, Cexp = self.exp_cv
-            mask = Cexp > 0  # логарифмическая шкала требует C > 0
-            ax.plot(Vexp[mask], Cexp[mask] * factor, "o", ms=4, color="#2ca02c",
-                    markerfacecolor="none", label="эксперимент")
+        # У каждого набора — свой маркер и цвет (simulator/style.py), в
+        # легенде — имя файла, чтобы несколько кривых были различимы.
+        for index, dataset in enumerate(self.exp_cv):
+            marker, color = dataset_style(index)
+            mask = dataset["value"] > 0  # логарифмическая шкала требует C > 0
+            ax.plot(dataset["voltage"][mask], dataset["value"][mask] * factor, marker, ms=5,
+                    color=color, markerfacecolor="none", label=dataset["label"])
 
         # ### ЗДЕСЬ настраивается ЛОГАРИФМИЧЕСКИЙ МАСШТАБ оси ёмкости ###
         # Лог. шкала по оси Y нужна, чтобы визуально оценивать резкость
@@ -333,7 +353,7 @@ class MesaApp(tk.Tk):
         ax.set_xlabel("Напряжение V, В")
         ax.set_ylabel(f"Ёмкость C, {unit} (лог. шкала)")
         ax.grid(True, which="both", linewidth=0.4, alpha=0.6)
-        if self.exp_cv is not None:
+        if self.exp_cv:
             ax.legend(fontsize=8, loc="best")
 
     # ---------------- схематическое изображение мезы ----------------

@@ -28,7 +28,7 @@
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
+from tkinter import ttk, messagebox, filedialog
 
 import numpy as np
 import matplotlib
@@ -41,7 +41,7 @@ from mesa_diode.simulator.physics import (
     capacitance, current_density_from_area, estimate_grading_m,
     MATERIAL_J0_A_CM2, robust_value_limits, shockley_current_density, solve_iv,
 )
-from mesa_diode.simulator.formulas import build_formulas_text
+from mesa_diode.simulator import formulas as formulas_module
 from mesa_diode.simulator.io import load_xy_file
 from mesa_diode.simulator.diagram import draw_mesa_diagram
 from mesa_diode.simulator.style import MAX_DATASETS, dataset_style, remaining_slots
@@ -226,33 +226,11 @@ class MesaApp(tk.Tk):
 
     # ---------------- окно «Формулы и параметры» ----------------
     def open_formulas_window(self):
-        """
-        Открывает отдельное окно (Toplevel) с описанием всех формул и
-        параметров модели.
-
-        ЧТОБЫ ИЗМЕНИТЬ СОДЕРЖИМОЕ ОКНА: правьте список FORMULA_SECTIONS
-        в simulator/formulas.py — эта функция лишь отображает то, что
-        вернёт build_formulas_text(); сама функция ничего не решает по
-        содержанию и трогать её для правки текста формул не нужно.
-
-        ЧТОБЫ ИЗМЕНИТЬ ВНЕШНИЙ ВИД ОКНА (размер, шрифт, перенос строк):
-          - geometry("800x700")   -> размер окна при открытии;
-          - font=("Consolas", 10) -> шрифт текста (моноширинный удобен для формул);
-          - wrap="word"           -> перенос по словам ("none" — без переноса,
-                                      тогда появится горизonтальная прокрутка).
-        """
-        win = tk.Toplevel(self)
-        win.title("Формулы и параметры модели")
-        win.geometry("800x700")
-
-        text_widget = scrolledtext.ScrolledText(win, wrap="word", font=("Consolas", 10))
-        text_widget.pack(fill="both", expand=True, padx=8, pady=8)
-
-        content = build_formulas_text()
-        text_widget.insert("1.0", content)
-        text_widget.configure(state="disabled")  # только чтение, чтобы не редактировали случайно
-
-        ttk.Button(win, text="Закрыть", command=win.destroy).pack(side="bottom", pady=(0, 8))
+        """Открывает отдельное окно с формулами модели и расшифровкой
+        параметров — оформление и содержание целиком в simulator/formulas.py
+        (структуры FORMULA_SECTIONS, PARAMETERS_TABLE и функция
+        open_formulas_window); здесь только вызов."""
+        formulas_module.open_formulas_window(self)
 
     # ---------------- загрузка/очистка экспериментальных данных ----------------
     def _load_experimental_files(self, dialog_title, target_list, error_title):

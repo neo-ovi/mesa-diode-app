@@ -4,11 +4,22 @@
 Версия 2. Возможности:
   - загрузка экспериментальных данных ВАХ и ВФХ из нескольких файлов сразу
     (до simulator.style.MAX_DATASETS штук на график) для сравнения с моделью;
+    маркеры маленькие с тонкой соединительной линией, форма различима даже
+    при наложении нескольких наборов друг на друга;
+  - диапазон расчёта ВАХ подстраивается под загруженные экспериментальные
+    данные, а не только под значения по умолчанию (см. recompute,
+    physics.adaptive_voltage_range/adaptive_point_count);
+  - третий график — плотность тока J-V по идеальному уравнению Шокли для
+    характерного материала (Si/Ge, тоггл + редактируемое поле J₀), и
+    опционально поверх него — J(S) = I_эксп / S_мезы по геометрии структуры
+    (тоггл «J(S)», см. _plot_jv);
+  - параметр d — диаметр окна кольцевого контакта (отдельно от диаметра
+    мезы D), отражён на схеме мезы;
   - логарифмическая шкала ёмкости на графике ВФХ (оценка резкости перехода);
   - отдельное окно «Формулы и параметры» (см. simulator/formulas.py);
   - подробные комментарии в местах, отвечающих за отрисовку/масштаб/расположение —
-    см. блоки "### ЗДЕСЬ ... ###" внутри методов _plot_iv, _plot_cv, _build_input_row;
-    схема мезы вынесена в simulator/diagram.py (draw_mesa_diagram).
+    см. блоки "### ЗДЕСЬ ... ###" внутри методов _plot_iv, _plot_cv, _plot_jv,
+    _build_input_row; схема мезы вынесена в simulator/diagram.py (draw_mesa_diagram).
 
 Запуск:        python scripts/run_simulator.py
 Сборка в exe:  см. mesa_diode/simulator/README.md
@@ -26,7 +37,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from mesa_diode.simulator.physics import (
-    MesaParams, auto_scale, capacitance, estimate_grading_m, solve_iv,
+    MesaParams, adaptive_point_count, adaptive_voltage_range, auto_scale,
+    capacitance, current_density_from_area, estimate_grading_m,
+    MATERIAL_J0_A_CM2, robust_value_limits, shockley_current_density, solve_iv,
 )
 from mesa_diode.simulator.formulas import build_formulas_text
 from mesa_diode.simulator.io import load_xy_file
@@ -36,6 +49,7 @@ from mesa_diode.simulator.style import MAX_DATASETS, dataset_style, remaining_sl
 PARAM_SPECS = [
     # (ключ, обозначение, единицы, значение_по_умолчанию)
     ("D",   "D",     "мкм",     "50"),
+    ("d",   "d",     "мкм",     "30"),
     ("h",   "h",     "мкм",     "2"),
     ("ND",  "N_D",   "см⁻³",    "1e17"),
     ("NA",  "N_A",   "см⁻³",    "5e17"),
@@ -45,18 +59,29 @@ PARAM_SPECS = [
     ("n2",  "n₂",    "б/р",     "2.0"),
 ]
 
+# Цвет точек J(S) — плотности тока, посчитанной из экспериментального тока
+# и геометрической площади мезы (в отличие от кривой по уравнению Шокли).
+JS_COLOR = "#9b870c"  # тёмно-жёлтый (мустард)
+
 
 class MesaApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Симулятор мезы Ge/Si — ВАХ и ВФХ")
-        self.geometry("1500x980")
-        self.minsize(1200, 820)
+        self.geometry("1850x1150")
+        self.minsize(1500, 950)
 
         # Экспериментальные данные, загруженные из файлов — до MAX_DATASETS
         # штук на каждый график. Каждый элемент: {"label", "voltage", "value"}
         self.exp_iv = []
         self.exp_cv = []
+
+        # Материал для справочной кривой J–V по уравнению Шокли (раздел
+        # "Материал сравнения" ниже) и тоггл наложения J(S) — плотности
+        # тока из эксперимента и площади мезы. Не путать с N_D/N_A —
+        # это отдельная, более простая идеальная модель для сравнения.
+        self.material_var = tk.StringVar(value="Ge")
+        self.js_var = tk.BooleanVar(value=False)
 
         self._build_menu()
         self._build_figure_area()
@@ -100,11 +125,19 @@ class MesaApp(tk.Tk):
 
     # ---------------- верхняя область: графики + схема ----------------
     def _build_figure_area(self):
-        self.fig = Figure(figsize=(13, 6.5), dpi=100)
-        gs = self.fig.add_gridspec(2, 2, height_ratios=[1.1, 1.0],
-                                    hspace=0.45, wspace=0.28)
+        # ### ЗДЕСЬ height_ratios отдаёт схеме мезы БОЛЬШЕ высоты, чем верхним
+        # трём графикам. Причина не эстетическая: текст на схеме (simulator/
+        # diagram.py) фиксированного размера в пунктах, а не в единицах
+        # холста — чем меньше физическая высота этого подграфика, тем крупнее
+        # тот же текст выглядит относительно схемы и тем скорее подписи
+        # наезжают друг на друга. Если наложения вернутся — увеличивайте эту
+        # долю (или общую высоту figsize), а не координаты в diagram.py.
+        self.fig = Figure(figsize=(16, 8.5), dpi=100)
+        gs = self.fig.add_gridspec(2, 3, height_ratios=[1.0, 1.4],
+                                    hspace=0.5, wspace=0.35)
         self.ax_iv = self.fig.add_subplot(gs[0, 0])
         self.ax_cv = self.fig.add_subplot(gs[0, 1])
+        self.ax_jv = self.fig.add_subplot(gs[0, 2])
         self.ax_mesa = self.fig.add_subplot(gs[1, :])
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
@@ -150,6 +183,31 @@ class MesaApp(tk.Tk):
 
             self.entries[key] = entry
 
+        # ### ЗДЕСЬ отдельный РЯД для справочной кривой J–V (уравнение Шокли) ###
+        # Материал/J₀ не входят в PARAM_SPECS и не передаются в MesaParams —
+        # это отдельная идеальная модель для сравнения (см. physics.py,
+        # MATERIAL_J0_A_CM2 и shockley_current_density), а не часть
+        # двухдиодной геометрической модели мезы выше.
+        material_row = ttk.Frame(outer, padding=(0, 4))
+        material_row.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(material_row, text="Материал (для J–V):",
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        for value in ("Si", "Ge"):
+            ttk.Radiobutton(material_row, text=value, value=value,
+                             variable=self.material_var,
+                             command=self._on_material_change).pack(side=tk.LEFT)
+
+        ttk.Label(material_row, text="  J₀ =", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 3))
+        self.j0_entry = ttk.Entry(material_row, width=10, justify="center")
+        self.j0_entry.insert(0, f"{MATERIAL_J0_A_CM2[self.material_var.get()]:g}")
+        self.j0_entry.pack(side=tk.LEFT)
+        self.j0_entry.bind("<Return>", lambda e: self.recompute())
+        ttk.Label(material_row, text="А/см²", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(3, 12))
+
+        ttk.Checkbutton(material_row, text="J(S) — из площади мезы и эксперим. тока",
+                         variable=self.js_var, command=self.recompute).pack(side=tk.LEFT)
+
         btn_row = ttk.Frame(outer)
         btn_row.pack(side=tk.TOP, fill=tk.X)
 
@@ -158,6 +216,13 @@ class MesaApp(tk.Tk):
 
         self.status_lbl = ttk.Label(btn_row, text="", foreground="#555555")
         self.status_lbl.pack(side=tk.LEFT)
+
+    def _on_material_change(self):
+        """Подставляет характерное J₀ выбранного материала в поле ввода.
+        Поле остаётся редактируемым — пользователь может ввести своё значение."""
+        self.j0_entry.delete(0, tk.END)
+        self.j0_entry.insert(0, f"{MATERIAL_J0_A_CM2[self.material_var.get()]:g}")
+        self.recompute()
 
     # ---------------- окно «Формулы и параметры» ----------------
     def open_formulas_window(self):
@@ -246,6 +311,10 @@ class MesaApp(tk.Tk):
 
         if vals["D"] <= 0 or vals["h"] <= 0:
             raise ValueError("Диаметр D и глубина h должны быть положительными.")
+        if vals["d"] <= 0:
+            raise ValueError("Диаметр окна d должен быть положительным.")
+        if vals["d"] >= vals["D"]:
+            raise ValueError("Диаметр окна d должен быть меньше диаметра мезы D.")
         if vals["ND"] <= 0 or vals["NA"] <= 0:
             raise ValueError("Концентрации N_D и N_A должны быть положительными.")
         if vals["T"] <= 0:
@@ -256,28 +325,51 @@ class MesaApp(tk.Tk):
             raise ValueError("Коэффициент неидеальности n₂ должен быть положительным.")
 
         return MesaParams(
-            D_um=vals["D"], h_um=vals["h"],
+            D_um=vals["D"], d_um=vals["d"], h_um=vals["h"],
             ND_si=vals["ND"], NA_ge=vals["NA"],
             T_K=vals["T"], Rs_ohm=vals["Rs"], Rsh_ohm=vals["Rsh"], n2=vals["n2"],
         )
+
+    def _read_j0(self):
+        """J₀ для справочной кривой J-V — не входит в _read_params/MesaParams,
+        это отдельная идеальная модель (см. комментарий у material_row)."""
+        raw = self.j0_entry.get().strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"Плотность тока насыщения J₀ задана некорректно: «{raw}»")
+        if value <= 0:
+            raise ValueError("Плотность тока насыщения J₀ должна быть положительной.")
+        return value
 
     # ---------------- основной пересчёт и перерисовка ----------------
     def recompute(self):
         try:
             p = self._read_params()
+            j0 = self._read_j0()
         except ValueError as e:
             messagebox.showerror("Ошибка ввода параметров", str(e))
             return
 
-        V_iv = np.linspace(-1.0, 0.6, 121)
+        # ### ЗДЕСЬ диапазон ВАХ подстраивается под загруженные экспериментальные
+        # данные, а не только под значения по умолчанию (-1.0…0.6 В) — иначе
+        # модельная кривая обрывается раньше точек эксперимента с широким
+        # диапазоном (см. adaptive_voltage_range/adaptive_point_count в physics.py)
+        exp_iv_voltages = [d["voltage"] for d in self.exp_iv]
+        v_min, v_max = adaptive_voltage_range(exp_iv_voltages)
+        n_points = adaptive_point_count(v_min, v_max)
+        V_iv = np.linspace(v_min, v_max, n_points)
         I = solve_iv(V_iv, p)
 
         Vc_max = max(0.05, 0.9 * p.Vbi)
         V_cv = np.linspace(-1.5, Vc_max, 121)
         C = capacitance(V_cv, p)
 
+        J_model = shockley_current_density(V_iv, j0, T_K=p.T)
+
         self._plot_iv(V_iv, I)
         self._plot_cv(V_cv, C, p.Vbi)
+        self._plot_jv(V_iv, J_model, p)
         self._plot_mesa(p)
 
         m, slope = estimate_grading_m(V_cv, C, p.Vbi)
@@ -293,22 +385,38 @@ class MesaApp(tk.Tk):
         ax = self.ax_iv
         ax.clear()
 
+        exp_values = [d["value"] for d in self.exp_iv]
+
         # ### ЗДЕСЬ задаётся МАСШТАБ отображения тока (авто-приставка А/мА/мкА/нА) ###
+        # Масштаб и границы оси берутся из ЭКСПЕРИМЕНТАЛЬНЫХ данных, если они
+        # загружены, а не из модели — иначе широкий диапазон напряжений
+        # (адаптированный под эксперимент, см. recompute) может дать на
+        # хвостах экспоненциально огромный модельный ток и сжать содержательную
+        # часть графика в невидимую линию у нуля (см. physics.robust_value_limits).
         # Если нужен фиксированный масштаб — замените вызов auto_scale(...)
         # на конкретную пару, например: factor, unit = 1e3, "мА"
-        combo = np.concatenate([I] + [d["value"] for d in self.exp_iv])
-        factor, unit = auto_scale(combo, "А")
+        factor, unit = auto_scale(np.concatenate(exp_values) if exp_values else I, "А")
 
         # ### ЗДЕСЬ задаётся сама КРИВАЯ МОДЕЛИ ВАХ ###
         ax.plot(V, I * factor, color="#1f6fb2", linewidth=1.8, label="модель")
 
         # ### ЗДЕСЬ добавляются ЭКСПЕРИМЕНТАЛЬНЫЕ точки ВАХ (если загружены) ###
         # У каждого набора — свой маркер и цвет (simulator/style.py), в
-        # легенде — имя файла, чтобы несколько кривых были различимы.
+        # легенде — имя файла, чтобы несколько кривых были различимы. Маркеры
+        # намеренно маленькие с тонкой соединительной линией — на плотных
+        # данных они визуально сливаются в линию не толще модельной, но
+        # форма маркера всё ещё различима при наложении нескольких наборов.
         for index, dataset in enumerate(self.exp_iv):
             marker, color = dataset_style(index)
-            ax.plot(dataset["voltage"], dataset["value"] * factor, marker, ms=5,
-                    color=color, markerfacecolor="none", label=dataset["label"])
+            ax.plot(dataset["voltage"], dataset["value"] * factor,
+                    marker=marker, linestyle="-", linewidth=0.6, ms=3,
+                    markeredgewidth=0.7, color=color, markerfacecolor="none",
+                    label=dataset["label"])
+
+        # Границы оси Y — по эксперименту (если есть), не по хвосту модели
+        # (см. комментарий выше про robust_value_limits).
+        y_lo, y_hi = robust_value_limits(exp_values, I)
+        ax.set_ylim(y_lo * factor, y_hi * factor)
 
         ax.axhline(0, color="#999999", linewidth=0.7)
         ax.axvline(0, color="#999999", linewidth=0.7)
@@ -333,12 +441,15 @@ class MesaApp(tk.Tk):
 
         # ### ЗДЕСЬ добавляются ЭКСПЕРИМЕНТАЛЬНЫЕ точки ВФХ (если загружены) ###
         # У каждого набора — свой маркер и цвет (simulator/style.py), в
-        # легенде — имя файла, чтобы несколько кривых были различимы.
+        # легенде — имя файла. Маркеры маленькие с тонкой линией — см.
+        # комментарий в _plot_iv.
         for index, dataset in enumerate(self.exp_cv):
             marker, color = dataset_style(index)
             mask = dataset["value"] > 0  # логарифмическая шкала требует C > 0
-            ax.plot(dataset["voltage"][mask], dataset["value"][mask] * factor, marker, ms=5,
-                    color=color, markerfacecolor="none", label=dataset["label"])
+            ax.plot(dataset["voltage"][mask], dataset["value"][mask] * factor,
+                    marker=marker, linestyle="-", linewidth=0.6, ms=3,
+                    markeredgewidth=0.7, color=color, markerfacecolor="none",
+                    label=dataset["label"])
 
         # ### ЗДЕСЬ настраивается ЛОГАРИФМИЧЕСКИЙ МАСШТАБ оси ёмкости ###
         # Лог. шкала по оси Y нужна, чтобы визуально оценивать резкость
@@ -355,6 +466,54 @@ class MesaApp(tk.Tk):
         ax.grid(True, which="both", linewidth=0.4, alpha=0.6)
         if self.exp_cv:
             ax.legend(fontsize=8, loc="best")
+
+    # ---------------- отрисовка J-V (уравнение Шокли) ----------------
+    def _plot_jv(self, V, J_model, p):
+        """Справочная кривая по уравнению Шокли для выбранного материала
+        (см. _read_j0), и опционально — плотность тока J(S) = I_эксп / S_мезы
+        поверх неё, если включён тоггл self.js_var (см. material_row)."""
+        ax = self.ax_jv
+        ax.clear()
+
+        js_enabled = self.js_var.get()
+        # Считается независимо от js_enabled — нужно для масштаба оси Y
+        # даже когда сами точки J(S) не отображаются (см. ниже).
+        exp_j_reference = [current_density_from_area(d["value"], p.A) for d in self.exp_iv]
+
+        # ### ЗДЕСЬ, как и в _plot_iv, масштаб и границы оси берутся из
+        # эксперимента, а не из модели Шокли — без Rs она может дать на
+        # широком диапазоне напряжений физически нереальные значения
+        # (см. physics.robust_value_limits).
+        factor, unit = auto_scale(np.concatenate(exp_j_reference) if exp_j_reference else J_model, "А/см²")
+
+        material = self.material_var.get()
+        ax.plot(V, J_model * factor, color="#7a1fb2", linewidth=1.8,
+                label=f"модель Шокли ({material})")
+
+        # ### ЗДЕСЬ рисуются точки J(S) — плотность тока из эксперимента и
+        # геометрической площади мезы (не из уравнения Шокли выше). Один
+        # цвет на все наборы (это диагностическая величина, а не сравнение
+        # разных файлов между собой — для этого есть график ВАХ слева).
+        # Отображаются только при включённом тоггле J(S) (self.js_var).
+        if js_enabled:
+            for index, (dataset, J_exp) in enumerate(zip(self.exp_iv, exp_j_reference)):
+                ax.plot(dataset["voltage"], J_exp * factor,
+                        marker="o", linestyle="-", linewidth=0.6, ms=3,
+                        markeredgewidth=0.7, color=JS_COLOR,
+                        label="J(S), эксперимент" if index == 0 else None)
+
+        # Границы оси Y — по эксперименту (если есть), не по хвосту модели
+        # (см. комментарий выше про robust_value_limits).
+        y_lo, y_hi = robust_value_limits(exp_j_reference, J_model)
+        ax.set_ylim(y_lo * factor, y_hi * factor)
+
+        ax.axhline(0, color="#999999", linewidth=0.7)
+        ax.axvline(0, color="#999999", linewidth=0.7)
+        ax.set_title("Плотность тока J–V (уравнение Шокли)", fontsize=10)
+        ax.set_xlabel("Напряжение V, В")
+        ax.set_ylabel(f"J, {unit}")
+        ax.grid(True, linewidth=0.4, alpha=0.6)
+        ax.legend(fontsize=8, loc="best")
 
     # ---------------- схематическое изображение мезы ----------------
     def _plot_mesa(self, p):

@@ -34,6 +34,20 @@ MU_GE_P = dict(mu_max=1900.0, mu_min=50.0, Nref=1.0e17, alpha=0.6)
 TAU_MINORITY = 1e-7   # с, время жизни неосновных носителей (диффузионный ток)
 TAU0_SCR = 1e-8       # с, время жизни в ОПЗ (рекомбинационный ток)
 
+# Характерные (табличные) плотности тока насыщения p-n перехода при 300 К —
+# только для справочного графика "идеальный диод по уравнению Шокли"
+# (см. shockley_current_density ниже). НЕ используются в двухдиодной
+# геометрической модели мезы выше (там ток насыщения p.J0 считается из
+# реальных параметров структуры). Порядок величины: у Ge собственная
+# концентрация носителей на несколько порядков больше, чем у Si (см.
+# NI_GE_300 против NI_SI_300), поэтому и характерный ток насыщения на
+# несколько порядков выше. Значения ориентировочные (типичный порядок
+# величины из учебной литературы) — в интерфейсе их можно заменить своими.
+MATERIAL_J0_A_CM2 = {
+    "Si": 1e-12,
+    "Ge": 1e-6,
+}
+
 
 def mobility(N, prm):
     """Формула Кофи-Томаса — см. simulator/formulas.py, раздел 7."""
@@ -52,8 +66,8 @@ class MesaParams:
     """Собирает первичные параметры и рассчитывает производные величины.
     Порядок вычислений соответствует разделам 1-6 окна «Формулы и параметры»."""
 
-    def __init__(self, D_um, h_um, ND_si, NA_ge, T_K, Rs_ohm, Rsh_ohm, n2):
-        self.D_um, self.h_um = D_um, h_um
+    def __init__(self, D_um, d_um, h_um, ND_si, NA_ge, T_K, Rs_ohm, Rsh_ohm, n2):
+        self.D_um, self.d_um, self.h_um = D_um, d_um, h_um
         self.ND, self.NA = ND_si, NA_ge
         self.T = T_K
         self.Rs, self.Rsh, self.n2 = Rs_ohm, Rsh_ohm, n2
@@ -168,3 +182,76 @@ def auto_scale(array, base_unit):
         if maxval * factor >= 1.0 or prefix == "п":
             return factor, prefix + base_unit
     return 1e12, "п" + base_unit
+
+
+def shockley_current_density(V, J0_A_cm2, T_K=300.0, n=1.0):
+    """Идеальное уравнение Шокли для плотности тока: J = J0*(exp(qV/(n*kT)) - 1).
+
+    Не связано с двухдиодной геометрической моделью мезы выше — это
+    справочная кривая по характерной плотности тока насыщения материала
+    (см. MATERIAL_J0_A_CM2), чтобы сравнить ВАХ мезы с «типичным» переходом
+    Si или Ge.
+    """
+    Vt = K * T_K / Q
+    x = np.clip(np.asarray(V, dtype=float) / (n * Vt), -50, 80)
+    return J0_A_cm2 * np.expm1(x)
+
+
+def current_density_from_area(current_A, area_cm2):
+    """Плотность тока J = I / S по геометрической площади мезы S = area_cm2."""
+    return np.asarray(current_A, dtype=float) / area_cm2
+
+
+def robust_value_limits(primary_arrays, fallback_array, margin_fraction=0.2):
+    """Границы оси Y по «содержательным» данным, а не по хвосту модели.
+
+    Экспоненциальные модели (Шокли, двухдиодная) при широком диапазоне
+    напряжений могут давать физически нереалистичные значения на краях
+    (реальный диод либо ограничен Rs, либо электрически пробивается задолго
+    до таких V) — если строить ось Y по ним, содержательная часть графика
+    (там, где есть эксперимент) сжимается в незаметную линию у нуля.
+
+    Если ``primary_arrays`` непусты (обычно — экспериментальные значения),
+    границы считаются по ним с запасом margin_fraction, а модельная кривая
+    может выходить за пределы видимой области — это ожидаемо. Если
+    ``primary_arrays`` пуст (данных не загружено), используются границы
+    ``fallback_array`` (обычно — сама модельная кривая) целиком.
+    """
+    values = [np.asarray(a) for a in primary_arrays if np.asarray(a).size]
+    if values:
+        combined = np.concatenate(values)
+        vmin, vmax = float(np.min(combined)), float(np.max(combined))
+    else:
+        fb = np.asarray(fallback_array)
+        finite = fb[np.isfinite(fb)]
+        vmin, vmax = (float(np.min(finite)), float(np.max(finite))) if finite.size else (0.0, 1.0)
+
+    span = vmax - vmin
+    margin = span * margin_fraction if span > 0 else max(abs(vmin), abs(vmax), 1.0) * margin_fraction
+    return vmin - margin, vmax + margin
+
+
+def adaptive_voltage_range(voltage_arrays, default_min=-1.0, default_max=0.6,
+                            margin_fraction=0.05):
+    """Диапазон напряжений для расчёта модели: покрывает значения по
+    умолчанию и все переданные экспериментальные массивы (с запасом по
+    краям), чтобы модельная кривая не обрывалась раньше точек эксперимента.
+    """
+    vmin, vmax = default_min, default_max
+    for arr in voltage_arrays:
+        arr = np.asarray(arr)
+        if arr.size:
+            vmin = min(vmin, float(np.min(arr)))
+            vmax = max(vmax, float(np.max(arr)))
+
+    span = vmax - vmin
+    margin = span * margin_fraction if span > 0 else 0.05
+    return vmin - margin, vmax + margin
+
+
+def adaptive_point_count(v_min, v_max, base_count=121, resolution_V=0.01, max_count=400):
+    """Число точек расчёта ВАХ: гуще на широком диапазоне напряжений, но не
+    в ущерб отклику интерфейса (solve_iv — метод Ньютона, до 60 итераций на
+    точку)."""
+    span = max(v_max - v_min, 0.0)
+    return int(np.clip(np.ceil(span / resolution_V), base_count, max_count))

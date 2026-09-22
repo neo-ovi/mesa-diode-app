@@ -16,13 +16,27 @@ from matplotlib.patches import Rectangle
 # ----------------------------------------------------------------------
 XLIM = (-2.0, 12.0)
 YLIM = (-2.0, 9.5)
+# ВАЖНО: увеличивать этот диапазон ради «больше места для текста» —
+# контринтуитивно, но НЕПРАВИЛЬНЫЙ способ чинить наложения. Текст рисуется
+# фиксированным размером в пунктах, а не в единицах холста; при aspect="equal"
+# и ограниченной высоте подграфика (см. MesaApp._build_figure_area, схема
+# делит окно с тремя другими графиками) увеличение YLIM снижает физический
+# масштаб (единиц данных на дюйм становится больше), и тот же текст в pt
+# занимает БОЛЬШУЮ, а не меньшую долю холста. Если элементы наезжают друг на
+# друга при уменьшении подграфика — увеличивайте высоту, выделенную схеме
+# в _build_figure_area (height_ratios), а не YLIM здесь.
 
 SUBSTRATE = dict(x0=1.0, x1=11.0, y0=0.0, y1=3.2)
 MESA = dict(x0=4.5, x1=7.5, y0=3.2, y1=6.0)
-CONTACT_GAP = 1.0                 # окно между половинками кольцевого контакта
-CONTACT_HALF_WIDTH = 0.8          # ширина каждой половинки кольца
 CONTACT_HEIGHT = 0.35
 BACK_CONTACT = dict(x0=2.0, x1=10.0, y0=-0.35, y1=0.0)
+
+# Окно кольцевого контакта рисуется пропорционально p.d_um/p.D_um (см.
+# draw_mesa_diagram) — не в масштабе схемы целиком, но соотношение окно/меза
+# соответствует введённым значениям. Клампы — чтобы вырожденные значения
+# (d около 0 или d около D) не схлопывали рисунок в нечитаемую полоску.
+MIN_GAP_RATIO = 0.05
+MAX_GAP_RATIO = 0.9
 
 CALLOUT_STYLE = dict(boxstyle="circle,pad=0.25", facecolor="white", edgecolor="black")
 
@@ -58,8 +72,8 @@ def _dimension(ax, x0, x1, y, label, tick_y0=None, tick_y1=None):
 def draw_mesa_diagram(ax, p):
     """Рисует схему мезы на переданных осях ``ax`` по параметрам ``p``.
 
-    ``p`` — объект с атрибутами D_um, h_um, ND, NA, T (см. physics.MesaParams).
-    Вызывается из MesaApp._plot_mesa после ``ax.clear()``.
+    ``p`` — объект с атрибутами D_um, d_um, h_um, ND, NA, T (см.
+    physics.MesaParams). Вызывается из MesaApp._plot_mesa после ``ax.clear()``.
     """
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
@@ -90,10 +104,16 @@ def draw_mesa_diagram(ax, p):
     _callout(ax, MESA["x1"] + 0.5, MESA["y1"] - 0.4, 3)
 
     # --- верхний контакт: кольцо в разрезе — две половинки с окном между ними ---
-    left_block = (mesa_cx - CONTACT_GAP / 2 - CONTACT_HALF_WIDTH,
-                  mesa_cx - CONTACT_GAP / 2)
-    right_block = (mesa_cx + CONTACT_GAP / 2,
-                   mesa_cx + CONTACT_GAP / 2 + CONTACT_HALF_WIDTH)
+    # Ширина окна пропорциональна d/D (клампы MIN/MAX_GAP_RATIO — см. выше).
+    mesa_width = MESA["x1"] - MESA["x0"]
+    gap_ratio = min(max(p.d_um / p.D_um, MIN_GAP_RATIO), MAX_GAP_RATIO)
+    contact_gap = mesa_width * gap_ratio
+    contact_half_width = (mesa_width - contact_gap) / 2
+
+    left_block = (mesa_cx - contact_gap / 2 - contact_half_width,
+                  mesa_cx - contact_gap / 2)
+    right_block = (mesa_cx + contact_gap / 2,
+                   mesa_cx + contact_gap / 2 + contact_half_width)
     contact_y0, contact_y1 = MESA["y1"], MESA["y1"] + CONTACT_HEIGHT
     for x0, x1 in (left_block, right_block):
         ax.add_patch(Rectangle((x0, contact_y0), x1 - x0, contact_y1 - contact_y0,
@@ -121,6 +141,12 @@ def draw_mesa_diagram(ax, p):
     _dimension(ax, MESA["x0"], MESA["x1"], y=8.0, label=f"D = {p.D_um:g} мкм",
                tick_y0=contact_y1, tick_y1=8.0)
 
+    # --- размер d: ширина окна кольца, отдельной строкой НИЖЕ стрелки D ---
+    # (y=7.1 — между верхом контакта ~contact_y1 и строкой D на y=8.0, не
+    # пересекается ни с той, ни с другой при типичных пропорциях мезы)
+    _dimension(ax, left_block[1], right_block[0], y=7.1, label=f"d = {p.d_um:g} мкм",
+               tick_y0=contact_y1, tick_y1=7.1)
+
     # --- размер h: высота мезы (от подложки до контакта), вынесен вправо от мезы ---
     h_x = MESA["x1"] + 2.0
     ax.plot([MESA["x1"], h_x], [MESA["y0"], MESA["y0"]],
@@ -132,9 +158,13 @@ def draw_mesa_diagram(ax, p):
     ax.text(h_x + 0.2, (MESA["y0"] + contact_y1) / 2, f"h = {p.h_um:g} мкм",
             ha="left", va="center", fontsize=9, fontweight="bold", rotation=90)
 
-    # --- сводка параметров ---
+    # --- сводка параметров --- (справа от мезы, НЕ на одной высоте со
+    # стрелками D/d — там и так тесно по горизонтали: этот блок текста
+    # достаточно широкий, чтобы дотянуться до x мезы почти при любой
+    # вертикальной позиции в этой колонке, поэтому его высота выбрана
+    # заведомо ниже блока D/d, а не просто "левее его текста")
     info = f"N_D = {p.ND:.2e} см⁻³\nN_A = {p.NA:.2e} см⁻³\nT = {p.T:g} К"
-    ax.text(XLIM[1] - 0.2, YLIM[1] - 0.6, info, ha="right", va="top", fontsize=8,
+    ax.text(XLIM[1] - 0.2, MESA["y0"] + 0.9, info, ha="right", va="top", fontsize=7,
             bbox=dict(boxstyle="round", facecolor="#f5f5f5", edgecolor="#999999"))
 
     # --- расшифровка номеров — одной строкой под схемой, как в оригинале ---

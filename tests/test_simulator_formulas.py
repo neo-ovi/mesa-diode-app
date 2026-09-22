@@ -73,6 +73,39 @@ def test_parameters_table_rows_are_4_tuples():
         assert units.strip() and used_in.strip()
 
 
+def _all_plain_strings():
+    plain = [formulas.INTRO_TEXT, formulas.PARAMETERS_TITLE]
+    for section in formulas.FORMULA_SECTIONS:
+        plain.append(section["title"])
+        plain.extend(desc for _sym, desc in section.get("legend", []))
+        if section.get("principle"):
+            plain.append(section["principle"])
+    for _sym, description, units, used_in in formulas.PARAMETERS_TABLE:
+        plain.extend([description, units, used_in])
+    return plain
+
+
+@pytest.mark.parametrize("text", _all_plain_strings())
+def test_plain_text_has_no_unrendered_markup(text):
+    # Обычный текст выводится виджетом Tk, а не mathtext: $ и \ в нём
+    # показались бы на экране как есть. После разбора индексов не должно
+    # остаться и фигурных скобок.
+    assert "$" not in text and "\\" not in text
+    rendered = "".join(chunk for chunk, _tag in formulas.split_index_markup(text))
+    assert "{" not in rendered and "}" not in rendered
+
+
+def test_split_index_markup_sub_and_sup():
+    assert formulas.split_index_markup("V_{bi} и 10^{−4}") == [
+        ("V", None), ("bi", "sub"), (" и 10", None), ("−4", "sup"),
+    ]
+
+
+def test_split_index_markup_keeps_plain_underscores():
+    text = "physics.solve_iv и estimate_grading_m"
+    assert formulas.split_index_markup(text) == [(text, None)]
+
+
 @pytest.mark.parametrize("tex", _all_mathtext_strings())
 def test_mathtext_syntax_is_valid(tex):
     # Настоящая проверка синтаксиса формул движком matplotlib — упадёт,

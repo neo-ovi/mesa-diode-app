@@ -694,3 +694,172 @@ def drude_mean_free_path(vth, mu, m_rel):
     страницей в проекте нет, только для сравнения с L."""
     from mesa_diode.simulator.materials import M0
     return (vth * 1e-2) * (mu * 1e-4) * (m_rel * M0) / Q * 1e2
+
+
+# ------------------------------------- §6.3. Идеальность из эксперимента --
+
+N_RISE = 0.20   # правило ТЗ: V₂ — локальный n превысил минимум на [V₁; V] более чем на 20 %
+
+
+@dataclass
+class IdealityResult:
+    n: float
+    dn: float
+    I0: float
+    V1: float
+    V2: float
+    V_local: np.ndarray    # напряжение на переходе для локального n(V)
+    n_local: np.ndarray
+
+
+def local_ideality(V, I, T):
+    """(6.4)/(6.5) n = [(kT/q)·d ln I/dV]⁻¹ центральными разностями —
+    [Ман20, с. 46, ур. (4), (5)]."""
+    return 1.0 / (thermal_voltage(T) * np.gradient(np.log(I), V))
+
+
+def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
+    """Коэффициент идеальности по прямой ветви (алгоритм §6.3).
+
+    1) V > 0, I > 0; при R_s > 0 V заменяется на V − I·R_s;
+    2) локальный n(V) по (6.5);
+    3) окно: V₁ = 3kT/q, V₂ — первая точка, где n превышает минимум на
+       [V₁; V] более чем на 20 % (правило ТЗ); window = (V₁, V₂) задаёт окно вручную;
+    4) n ± δn — подгонка (6.3) I = I₀[exp(qV/nkT) − 1] по ln I (curve_fit)
+       [Ман20, с. 45, ур. (2)].
+    Возвращает IdealityResult или None, если точек меньше трёх."""
+    from scipy.optimize import curve_fit
+
+    V = np.asarray(V, dtype=float)
+    I = np.asarray(I, dtype=float)
+    mask = np.isfinite(V) & np.isfinite(I) & (V > 0) & (I > 0)
+    V, I = V[mask], I[mask]
+    if V.size < 3:
+        return None
+    Vj = V - I * Rs if Rs > 0 else V.copy()
+    order = np.argsort(Vj)
+    Vj, I = Vj[order], I[order]
+    Vt = thermal_voltage(T)
+    n_loc = local_ideality(Vj, I, T)
+
+    if window is None:
+        V1 = 3.0 * Vt
+        V2 = Vj[-1]
+        running = np.inf
+        for v, n in zip(Vj, n_loc):
+            if v < V1 or not np.isfinite(n) or n <= 0:
+                continue
+            running = min(running, n)
+            if n > (1.0 + N_RISE) * running:
+                V2 = v
+                break
+    else:
+        V1, V2 = window
+    sel = (Vj >= V1) & (Vj <= V2)
+    if sel.sum() < 3:
+        return None
+    x, y = Vj[sel], np.log(I[sel])
+
+    def model(v, lnI0, n):
+        return lnI0 + np.log(np.expm1(v / (n * Vt)))
+
+    slope, intercept = np.polyfit(x, y, 1)
+    n0 = 1.0 / (Vt * slope) if slope > 0 else 1.5
+    try:
+        popt, pcov = curve_fit(model, x, y, p0=(intercept, n0),
+                               bounds=([-200.0, 0.3], [50.0, 20.0]))
+    except (RuntimeError, ValueError):
+        return None
+    dn = float(np.sqrt(pcov[1, 1])) if np.isfinite(pcov[1, 1]) else float("nan")
+    return IdealityResult(n=float(popt[1]), dn=dn, I0=float(np.exp(popt[0])),
+                          V1=float(V1), V2=float(V2), V_local=Vj, n_local=n_loc)
+
+
+def empirical_current(V, I0, n, T=300.0):
+    """(6.3) I = I₀[exp(qV/nkT) − 1] — [Ман20, с. 45, ур. (2)]; эмпирика."""
+    return I0 * _expm1(np.asarray(V, dtype=float) / (n * thermal_voltage(T)))
+
+
+def effective_ideality(I_diff, I_gr):
+    """(6.6) n_eff = (I_diff + I_gr)/(I_diff + I_gr/2) — подстановка (4.4) и (5.4)
+    в (6.4) при V ≫ kT/q."""
+    return (I_diff + I_gr) / (I_diff + I_gr / 2.0)
+
+
+def gr_share_from_ideality(n):
+    """Доля тока ОПЗ из (6.6): 2(1 − 1/n)."""
+    return 2.0 * (1.0 - 1.0 / n)
+
+
+# ------------------------------------------- §6.6. Сравнение сценариев --
+
+def _rms(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    return float(np.sqrt(np.mean(values ** 2))) if values.size else float("nan")
+
+
+def current_mismatch(s, V_exp, I_exp):
+    """(6.7) δ_I = √(Σ(lg|I_mod| − lg|I_exp|)²/N) по точкам |V| > kT/q;
+    для сценария B — только обратная ветвь. Метрика ТЗ."""
+    V_exp = np.asarray(V_exp, dtype=float)
+    I_exp = np.asarray(I_exp, dtype=float)
+    mask = (np.abs(V_exp) > s.Vt) & (I_exp != 0) & np.isfinite(I_exp)
+    if s.scenario == SCENARIO_B:
+        mask &= V_exp < 0
+    if not mask.any():
+        return float("nan")
+    I_mod = solve_iv(s, V_exp[mask]).I
+    ok = I_mod != 0
+    return _rms(np.log10(np.abs(I_mod[ok])) - np.log10(np.abs(I_exp[mask][ok])))
+
+
+def capacitance_mismatch(s, V_exp, C_exp):
+    """(6.8) δ_C = √(Σ((C_mod − C_exp)/C_exp)²/N). Метрика ТЗ."""
+    V_exp = np.asarray(V_exp, dtype=float)
+    C_exp = np.asarray(C_exp, dtype=float)
+    mask = np.isfinite(C_exp) & (C_exp > 0)
+    if not mask.any():
+        return float("nan")
+    C_mod = capacitance(s, V_exp[mask])
+    return _rms((C_mod - C_exp[mask]) / C_exp[mask])
+
+
+def scenario_summary(s, exp_iv=None, exp_cv=None, window=None):
+    """Строка таблицы §6.6 для одного сценария: V_bi, W(0), C(0), C(−1 В),
+    N_eff, отсечка 1/C², I(−1 В), n_мод, V_LI, δ_I, δ_C, изоляция (1.2)."""
+    V_fwd = np.linspace(0.0, max(0.5, s.Vbi), 121)
+    iv = solve_iv(s, V_fwd)
+    ideality = ideality_from_data(V_fwd, iv.I, s.T, s.Rs, window)
+    return {
+        "scenario": s.scenario,
+        "Vbi": s.Vbi,
+        "W0": float(depletion_width(s, 0.0)),
+        "C0": float(capacitance(s, 0.0)),
+        "Cm1": float(capacitance(s, -1.0)),
+        "N_eff": s.N_eff,
+        "cutoff": c2_cutoff(s),
+        "I_m1": float(solve_iv(s, np.array([-1.0])).I[0]),
+        "n_mod": ideality.n if ideality else float("nan"),
+        "V_LI": low_injection_voltage(s),
+        "delta_I": current_mismatch(s, *exp_iv) if exp_iv is not None else float("nan"),
+        "delta_C": capacitance_mismatch(s, *exp_cv) if exp_cv is not None else float("nan"),
+        "isolation": isolation_status(s, 0.0)[1],
+    }
+
+
+def compare_scenarios(s, exp_iv=None, exp_cv=None, c2_window=None, window=None):
+    """Режим «оба» (§6.6): расчёт A и B с общими параметрами, без подгонки.
+
+    exp_iv = (V, I), exp_cv = (V, C) — эксперимент. Главный критерий —
+    N из наклона экспериментальной 1/C² (3.5) против N_eff сценариев;
+    второй — абсолютная ёмкость. Возвращает {"A": {...}, "B": {...}, "N_exp": ...}."""
+    result = {sc: scenario_summary(s.with_scenario(sc), exp_iv, exp_cv, window)
+              for sc in SCENARIOS}
+    N_exp = float("nan")
+    if exp_cv is not None:
+        V, C = (np.asarray(a, dtype=float) for a in exp_cv)
+        win = c2_window if c2_window is not None else (V.min(), 0.0)
+        N_exp, _ = fit_inv_c2(V, C, s.area, s.eps, win)
+    result["N_exp"] = N_exp
+    return result

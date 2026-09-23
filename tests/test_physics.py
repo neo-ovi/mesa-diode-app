@@ -308,3 +308,69 @@ def test_reference_table_implant_group_from_metadata():
     group = next(g for g in data.groups if g.title.startswith("Имплантация"))
     limit = next(r for r in group.rows if r.label.startswith("N_D ≤"))
     assert rel(limit.value, 2e14 / (0.4 * UM), 1e-12)
+
+
+# ----------------------------------------------- §6.3 и §6.6 --
+
+def test_ideality_on_synthetic_data():
+    Vt = ph.thermal_voltage(T300)
+    V = np.linspace(0.08, 0.2, 40)
+    I = 1e-9 * np.expm1(V / (1.4 * Vt))
+    result = ph.ideality_from_data(V, I, T300)
+    assert result.n == pytest.approx(1.400, abs=1e-3)
+
+
+def test_ideality_corrects_series_resistance():
+    Vt = ph.thermal_voltage(T300)
+    Vj = np.linspace(0.08, 0.3, 60)
+    I = 1e-9 * np.expm1(Vj / (1.4 * Vt))
+    Rs = 50.0
+    result = ph.ideality_from_data(Vj + I * Rs, I, T300, Rs=Rs)
+    assert result.n == pytest.approx(1.400, abs=1e-3)
+
+
+def test_ideality_window_stops_where_local_n_rises():
+    Vt = ph.thermal_voltage(T300)
+    Vj = np.linspace(0.0, 0.4, 161)
+    I = 1e-9 * np.expm1(Vj / Vt)
+    V = Vj + I * 2000.0            # изгиб от R_s, не учтённого в анализе
+    result = ph.ideality_from_data(V, I, T300)
+    assert result.V1 == pytest.approx(3 * Vt)
+    assert result.V2 < V.max()
+    # окно по правилу ТЗ допускает рост локального n до 20 % — отсюда смещение оценки
+    assert result.n == pytest.approx(1.0, abs=0.05)
+
+
+def test_manual_window_is_respected():
+    Vt = ph.thermal_voltage(T300)
+    V = np.linspace(0.08, 0.2, 40)
+    result = ph.ideality_from_data(V, 1e-9 * np.expm1(V / (1.4 * Vt)), T300, window=(0.1, 0.15))
+    assert (result.V1, result.V2) == (0.1, 0.15)
+
+
+def test_effective_ideality_equal_components():
+    assert ph.effective_ideality(1.0, 1.0) == pytest.approx(1.333, abs=5e-3)
+
+
+def test_gr_share_limits():
+    assert ph.gr_share_from_ideality(1.0) == 0.0
+    assert ph.gr_share_from_ideality(2.0) == pytest.approx(1.0)
+
+
+def test_model_ideality_is_one_for_pure_diffusion():
+    s = synth(tau0_bg=1e30, Rs=0.0, Rsh=float("inf"), bc_A_n=ph.LONG, bc_A_p=ph.LONG)
+    V = np.linspace(0.0, 0.2, 81)
+    result = ph.ideality_from_data(V, ph.solve_iv(s, V).I, T300)
+    assert result.n == pytest.approx(1.0, abs=0.01)
+
+
+def test_compare_scenarios_recognises_source_scenario():
+    s = synth(N_i=1e16, rho_sub=10.0)
+    truth = s.with_scenario(ph.SCENARIO_A)
+    V = np.linspace(-1.0, -0.1, 19)
+    C = ph.capacitance(truth, V)
+    I = ph.solve_iv(truth, V).I
+    result = ph.compare_scenarios(s, exp_iv=(V, I), exp_cv=(V, C))
+    assert result["A"]["delta_C"] < 1e-9 and result["A"]["delta_I"] < 1e-9
+    assert result["B"]["delta_C"] > 0.1
+    assert result["N_exp"] == pytest.approx(result["A"]["N_eff"], rel=5e-3)

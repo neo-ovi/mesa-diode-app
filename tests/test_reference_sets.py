@@ -95,3 +95,15 @@ def test_structure_reference_warning(case):
 def test_dislocation_lifetime(case):
     tau = ph.dislocation_lifetime(case["sigma_R"], case["N_dis"])
     assert tau == pytest.approx(case["expected_s"], rel=case["rel"])
+
+
+@pytest.mark.parametrize("case", _cases("ideality_synthetic"))
+def test_ideality_reference(case):
+    V = np.linspace(case["V"][0], case["V"][1], 40)
+    I = 1e-9 * np.expm1(V / (case["n"] * ph.thermal_voltage(300.0)))
+    assert ph.ideality_from_data(V, I, 300.0).n == pytest.approx(case["expected"], abs=case["abs"])
+
+
+@pytest.mark.parametrize("case", _cases("gr_share"))
+def test_gr_share_reference(case):
+    assert ph.gr_share_from_ideality(case["n"]) == pytest.approx(case["expected"], abs=case["abs"])

@@ -262,3 +262,49 @@ def test_sns_factor_is_continuous_and_bounded():
 
 def test_edge_area_zero_when_scr_inside_mesa():
     assert float(ph.edge_area(synth(), -1.0)) == 0.0
+
+
+# ------------------------------------------------- Справочник (§6.2, §6.4, §7.2) --
+
+from mesa_diode.simulator import reference as ref
+
+
+
+def test_boundary_recommendations_rule():
+    b = synth(ND_plus=1e19, N_i=1e16).with_scenario(ph.SCENARIO_B)
+    rec = ph.boundary_recommendations(b)
+    assert rec["n"][1] == ph.RECOMMEND_REFLECT      # n⁺ в ≥10 раз сильнее
+    assert rec["p"][1] == ph.RECOMMEND_SINK         # металл
+    assert ph.boundary_recommendations(synth(N_i=1e15, rho_sub=0.05))["p"][1] == ph.RECOMMEND_REFLECT
+    assert ph.boundary_recommendations(synth(N_i=1e16, rho_sub=50.0))["p"][1] == ph.RECOMMEND_SINK
+    assert ph.boundary_recommendations(synth(N_i=1e15, rho_sub=10.0))["p"][1] == ph.RECOMMEND_INTERMEDIATE
+
+
+def test_isolation_levels_scenario_b():
+    b = synth(N_i=1e16, rho_sub=10.0).with_scenario(ph.SCENARIO_B)
+    xn, xp = (float(x) for x in ph.depletion_edges(b, 0.0))
+    from dataclasses import replace
+    assert ph.isolation_status(replace(b, h=b.d_epi - 2 * xn), 0.0)[0] == ph.NOT_ISOLATED
+    assert ph.isolation_status(replace(b, h=b.d_epi), 0.0)[0] == ph.EDGE
+    assert ph.isolation_status(replace(b, h=b.d_epi + 2 * xp), 0.0)[0] == ph.ISOLATED
+
+
+def test_reference_table_builds_and_flags_degenerate_layer():
+    data = ref.reference_table(synth(ND_plus=1e19))
+    titles = [g.title for g in data.groups]
+    assert titles[0] == "Материал" and any(t.startswith("Переход") for t in titles)
+    assert any("вырожд" in w for w in data.warnings)
+
+
+def test_reference_table_flags_empirical_n2_and_sigma_extrapolation():
+    data = ref.reference_table(synth(n2=1.8, N_dis=1e3))
+    assert any("n₂" in w for w in data.warnings)
+    assert any("экстраполяция" in w for w in data.warnings)
+
+
+def test_reference_table_implant_group_from_metadata():
+    meta = {"implant": {"dose_cm2": 2e14, "energy_keV": 30, "anneal": "—"}}
+    data = ref.reference_table(synth(), metadata=meta)
+    group = next(g for g in data.groups if g.title.startswith("Имплантация"))
+    limit = next(r for r in group.rows if r.label.startswith("N_D ≤"))
+    assert rel(limit.value, 2e14 / (0.4 * UM), 1e-12)

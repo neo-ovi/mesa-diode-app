@@ -12,6 +12,7 @@ import pytest
 
 from mesa_diode import config
 from mesa_diode.simulator import physics as ph
+from mesa_diode.simulator import reference
 
 
 def _load():
@@ -66,6 +67,7 @@ def _quantities(s):
         "I_m1": lambda: ph.solve_iv(s, np.array([-1.0])).I[0],
         "I_p02": lambda: ph.solve_iv(s, np.array([0.2])).I[0],
         "dA_m1_cm2": lambda: ph.edge_area(s, -1.0),
+        "VLI": lambda: ph.low_injection_voltage(s),
     }
 
 
@@ -77,8 +79,16 @@ def _structure_cases():
 @pytest.mark.parametrize("case, key", _structure_cases())
 def test_structure_reference_value(case, key):
     s = ph.Structure(**case["params"])
-    expected, tol = case["expected"][key]
-    assert float(_quantities(s)[key]()) == pytest.approx(expected, rel=tol, abs=1e-12)
+    expected, tol, *abs_tol = case["expected"][key]
+    value = float(_quantities(s)[key]())
+    assert value == pytest.approx(expected, rel=tol, abs=abs_tol[0] if abs_tol else 1e-12)
+
+
+@pytest.mark.parametrize("case", [c for c in _cases("structures") if "expected_warning" in c],
+                         ids=lambda c: c["name"])
+def test_structure_reference_warning(case):
+    data = reference.reference_table(ph.Structure(**case["params"]))
+    assert any(case["expected_warning"] in w for w in data.warnings)
 
 
 @pytest.mark.parametrize("case", _cases("tau_dis"))

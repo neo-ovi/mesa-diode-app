@@ -306,7 +306,7 @@ def test_reference_table_implant_group_from_metadata():
     meta = {"implant": {"dose_cm2": 2e14, "energy_keV": 30, "anneal": "—"}}
     data = ref.reference_table(synth(), metadata=meta)
     group = next(g for g in data.groups if g.title.startswith("Имплантация"))
-    limit = next(r for r in group.rows if r.label.startswith("N_D ≤"))
+    limit = next(r for r in group.rows if r.label.startswith("N_{D} ≤"))
     assert rel(limit.value, 2e14 / (0.4 * UM), 1e-12)
 
 

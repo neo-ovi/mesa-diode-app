@@ -412,3 +412,12 @@ def test_startup_without_data_dir_is_neutral(monkeypatch):
     monkeypatch.delenv("MESA_DATA_DIR", raising=False)
     assert presets.reference_preset() is None
     assert presets.startup_preset().params == presets.DEFAULT_PARAMS
+
+
+def test_auto_window_keeps_at_least_three_points_on_sparse_data():
+    Vt = ph.thermal_voltage(T300)
+    Vj = np.linspace(0.02, 0.36, 14)
+    I = 1e-9 * np.expm1(Vj / Vt)
+    result = ph.ideality_from_data(Vj + I * 3e5, I, T300)  # сильный изгиб от R_s
+    assert result is not None
+    assert ((result.V_local >= result.V1) & (result.V_local <= result.V2)).sum() >= 3

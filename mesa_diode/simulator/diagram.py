@@ -72,36 +72,36 @@ def _dimension(ax, x0, x1, y, label, tick_y0=None, tick_y1=None):
 def draw_mesa_diagram(ax, p):
     """Рисует схему мезы на переданных осях ``ax`` по параметрам ``p``.
 
-    ``p`` — объект с атрибутами D_um, d_um, h_um, ND, NA, T (см.
-    physics.MesaParams). Вызывается из MesaApp._plot_mesa после ``ax.clear()``.
+    ``p`` — объект с атрибутами D_um (диаметр мезы), d_um (внутренний
+    диаметр кольца), h_um и i_type (подпись типа i-слоя). Вызывается из
+    MesaApp._plot_mesa после ``ax.clear()``.
     """
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(
-        "Схема мезы (условно, не в масштабе): D — диаметр, h — глубина, "
-        "N_D — доноры (подложка Ge(100), ГДГ-45), N_A — акцепторы (меза Ge)",
+        f"Схема мезы (не в масштабе), {p.i_type}",
         fontsize=9)
 
     mesa_cx = (MESA["x0"] + MESA["x1"]) / 2
 
-    # --- подложка ГДГ-45, Ge(100), N_D ---
+    # --- подложка p-Ge, N_A из ρ_sub ---
     ax.add_patch(Rectangle(
         (SUBSTRATE["x0"], SUBSTRATE["y0"]),
         SUBSTRATE["x1"] - SUBSTRATE["x0"], SUBSTRATE["y1"] - SUBSTRATE["y0"],
         facecolor="#cfe3f7", edgecolor="black", linewidth=1))
     ax.text(mesa_cx, (SUBSTRATE["y0"] + SUBSTRATE["y1"]) / 2,
-            "ГДГ-45, Ge(100), N_D", ha="center", va="center", fontsize=11)
+            "подложка p-Ge, N_A", ha="center", va="center", fontsize=11)
     _callout(ax, SUBSTRATE["x1"] + 0.5, (SUBSTRATE["y0"] + SUBSTRATE["y1"]) / 2, 4)
 
-    # --- меза Ge, N_A (прямоугольник, без искусственного скоса) ---
+    # --- меза: эпитаксия n⁺ / i (прямоугольник, без искусственного скоса) ---
     ax.add_patch(Rectangle(
         (MESA["x0"], MESA["y0"]), MESA["x1"] - MESA["x0"], MESA["y1"] - MESA["y0"],
         facecolor="#d9c2a3", edgecolor="black", linewidth=1))
-    ax.text(mesa_cx, (MESA["y0"] + MESA["y1"]) / 2, "Ge, N_A",
-            ha="center", va="center", fontsize=11)
-    _callout(ax, MESA["x1"] + 0.5, MESA["y1"] - 0.4, 3)
+    ax.text(mesa_cx, (MESA["y0"] + MESA["y1"]) / 2, "n⁺/i",
+            ha="center", va="center", fontsize=10)
+    _callout(ax, MESA["x1"] + 0.5, (MESA["y0"] + MESA["y1"]) / 2, 3)
 
     # --- верхний контакт: кольцо в разрезе — две половинки с окном между ними ---
     # Ширина окна пропорциональна d/D (клампы MIN/MAX_GAP_RATIO — см. выше).
@@ -158,17 +158,8 @@ def draw_mesa_diagram(ax, p):
     ax.text(h_x + 0.2, (MESA["y0"] + contact_y1) / 2, f"h = {p.h_um:g} мкм",
             ha="left", va="center", fontsize=9, fontweight="bold", rotation=90)
 
-    # --- сводка параметров --- (справа от мезы, НЕ на одной высоте со
-    # стрелками D/d — там и так тесно по горизонтали: этот блок текста
-    # достаточно широкий, чтобы дотянуться до x мезы почти при любой
-    # вертикальной позиции в этой колонке, поэтому его высота выбрана
-    # заведомо ниже блока D/d, а не просто "левее его текста")
-    info = f"N_D = {p.ND:.2e} см⁻³\nN_A = {p.NA:.2e} см⁻³\nT = {p.T:g} К"
-    ax.text(XLIM[1] - 0.2, MESA["y0"] + 0.9, info, ha="right", va="top", fontsize=7,
-            bbox=dict(boxstyle="round", facecolor="#f5f5f5", edgecolor="#999999"))
-
     # --- расшифровка номеров — одной строкой под схемой, как в оригинале ---
-    ax.text((XLIM[0] + XLIM[1]) / 2, YLIM[0] + 0.3,
-            "1 — контактное кольцо   2 — тыльный контакт (к подложке)   "
-            "3 — меза-структура   4 — подложка",
+    ax.text((XLIM[0] + XLIM[1]) / 2 + 0.6, YLIM[0] + 0.3,
+            "1 — кольцо   2 — тыльный контакт   "
+            "3 — меза n⁺/i   4 — подложка",
             ha="center", va="bottom", fontsize=8, color="#333333")

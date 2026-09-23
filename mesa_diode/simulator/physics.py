@@ -753,6 +753,11 @@ def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
             if n > (1.0 + N_RISE) * running:
                 V2 = v
                 break
+        # Подгонка двух параметров требует не менее трёх точек: на редких
+        # данных окно по правилу 20 % расширяется до третьей точки от V₁.
+        above = Vj[Vj >= V1]
+        if above.size >= 3 and ((Vj >= V1) & (Vj <= V2)).sum() < 3:
+            V2 = above[2]
     else:
         V1, V2 = window
     sel = (Vj >= V1) & (Vj <= V2)

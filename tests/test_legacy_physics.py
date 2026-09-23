@@ -7,7 +7,7 @@
 import numpy as np
 import pytest
 
-from mesa_diode.simulator.physics import (
+from mesa_diode.simulator.legacy_physics import (
     MesaParams, adaptive_point_count, adaptive_voltage_range, auto_scale,
     capacitance, current_density_from_area, depletion_width,
     estimate_grading_m, mobility, ni_of_T, shockley_current_density,

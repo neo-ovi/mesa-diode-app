@@ -36,7 +36,7 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from mesa_diode.simulator.physics import (
+from mesa_diode.simulator.legacy_physics import (
     MesaParams, adaptive_point_count, adaptive_voltage_range, auto_scale,
     capacitance, current_density_from_area, estimate_grading_m,
     MATERIAL_J0_A_CM2, robust_value_limits, shockley_current_density, solve_iv,

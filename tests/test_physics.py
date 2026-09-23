@@ -374,3 +374,41 @@ def test_compare_scenarios_recognises_source_scenario():
     assert result["A"]["delta_C"] < 1e-9 and result["A"]["delta_I"] < 1e-9
     assert result["B"]["delta_C"] > 0.1
     assert result["N_exp"] == pytest.approx(result["A"]["N_eff"], rel=5e-3)
+
+
+# ------------------------------------------------------------ §5.4 наборы --
+
+from mesa_diode.simulator import presets
+
+
+def test_preset_roundtrip_is_lossless(tmp_path):
+    original = presets.default_preset()
+    original.params["N_i"] = 3.3e15
+    original.params["i_type"] = presets.I_TYPE_BOTH
+    original.metadata = {"implant": {"dose_cm2": 2e14}, "note": "проверка"}
+    original.files = {"iv": ["iv/a.csv"], "cv": []}
+    original.notes = {"6.3": "текст"}
+    saved = presets.save_preset(original, tmp_path / "set.json")
+    loaded = presets.load_preset(saved.path)
+    assert loaded.to_json() == original.to_json()
+    assert loaded.resolved_files("iv") == [tmp_path / "iv/a.csv"]
+
+
+def test_preset_rejects_foreign_json(tmp_path):
+    path = tmp_path / "x.json"
+    path.write_text('{"a": 1}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        presets.load_preset(path)
+
+
+def test_default_preset_builds_structure_in_calc_units():
+    s = presets.to_structure(presets.DEFAULT_PARAMS)
+    assert s.scenario == ph.SCENARIO_B
+    assert s.D == pytest.approx(500e-4)
+    assert presets.to_structure({"i_type": presets.I_TYPE_P}).scenario == ph.SCENARIO_A
+
+
+def test_startup_without_data_dir_is_neutral(monkeypatch):
+    monkeypatch.delenv("MESA_DATA_DIR", raising=False)
+    assert presets.reference_preset() is None
+    assert presets.startup_preset().params == presets.DEFAULT_PARAMS

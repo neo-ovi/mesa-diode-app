@@ -25,6 +25,7 @@ from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator import presets
 from mesa_diode.simulator import reference as ref
 from mesa_diode.simulator import formulas as formulas_module
+from mesa_diode.simulator import help as help_module
 from mesa_diode.simulator.io import load_xy_file
 from mesa_diode.simulator.diagram import draw_mesa_diagram
 from mesa_diode.simulator.plot_utils import (
@@ -143,6 +144,11 @@ class MesaApp(tk.Tk):
 
         self.help_menu = tk.Menu(menubar, tearoff=0)
         self.help_menu.add_command(label="Формулы и параметры", command=self.open_formulas_window)
+        self.help_menu.add_separator()
+        self.help_menu.add_command(label="Методичка (PDF)",
+                                   command=lambda: help_module.open_metodichka(self, "pdf"))
+        self.help_menu.add_command(label="Методичка (Word)",
+                                   command=lambda: help_module.open_metodichka(self, "docx"))
         menubar.add_cascade(label="Справка", menu=self.help_menu)
         self.config(menu=menubar)
 

@@ -160,6 +160,9 @@ SCENARIOS = (SCENARIO_A, SCENARIO_B)
 SINK, REFLECT, LONG = "sink", "reflect", "long"
 BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "длинная база"}
 
+MODEL_PHYSICAL = "physical"     # физическая модель §2–§6
+MODEL_EMPIRICAL = "empirical"   # эмпирическая модель (6.3): J₀ и n задаются (базовый режим)
+
 VBI_DEGENERATE = "degenerate"   # (3.1а), используется в расчёте всегда
 VBI_BOLTZMANN = "boltzmann"     # (3.1), для сравнения и эталонов §9
 
@@ -219,6 +222,9 @@ class Structure:
     sns_refinement: bool = False
     edge_area: bool = False
     vbi_method: str = VBI_DEGENERATE
+    model: str = MODEL_PHYSICAL
+    J0_emp: float = 1e-6              # А/см², эмпирическая модель (6.3)
+    n_emp: float = 1.5                # идеальность эмпирической модели (6.3)
     material: object = GE
 
     def with_scenario(self, scenario):
@@ -567,7 +573,17 @@ def leak_current(s, V):
 
 
 def components(s, Vd):
-    """Компоненты тока (6.1) при напряжении на переходе V_d: I_diff, I_gr, I_sh, I_L, А."""
+    """Компоненты тока (6.1) при напряжении на переходе V_d, А.
+
+    Физическая модель: I_diff, I_gr, I_sh, I_L. Эмпирическая (базовый режим):
+    I_emp = A·J₀·(e^{qV/nkT} − 1) по (6.3) [Ман20, с. 45, ур. (2)], I_sh, I_L."""
+    if s.model == MODEL_EMPIRICAL:
+        Vd = np.asarray(Vd, dtype=float)
+        return {
+            "emp": s.area * s.J0_emp * _expm1(Vd / (s.n_emp * s.Vt)),
+            "sh": shunt_current(s, Vd),
+            "L": leak_current(s, Vd),
+        }
     return {
         "diff": diffusion_current(s, Vd),
         "gr": gr_current(s, Vd),
@@ -941,3 +957,50 @@ def compare_scenarios(s, exp_iv=None, exp_cv=None, c2_window=None, window=None):
         N_exp, _ = fit_inv_c2(V, C, s.area, s.eps, win)
     result["N_exp"] = N_exp
     return result
+
+
+# ------------------------------------- оценка τ₀ по обратной ветви ВАХ --
+
+@dataclass
+class Tau0Estimate:
+    V: float
+    I_gr: float          # ток ОПЗ, оставшийся после вычета шунта и диффузии, А
+    tau0: float          # τ₀ по обращению (5.4), с
+    tau0_bg: float       # τ₀^bg по (5.10): 1/τ₀^bg = 1/τ₀ − σ_R·N_dis (nan, если < 0)
+
+
+def estimate_tau0_from_reverse(s, V_exp, I_exp, V_at=-1.0, diagnostics=None):
+    """Оценка τ₀ по обратной ветви: обращение (5.4) при V = V_at.
+
+    Из измеренного |I(V_at)| вычитаются шунт V/R_sh (6.1) и модельный
+    диффузионный ток (4.4); остаток считается током ОПЗ (5.4), откуда
+    τ₀ = q·n_i·W(V)·A·|e^{qV/n₂kT} − 1| / (2·|I_gr|). Это оценка: она верна,
+    если обратный ток определяется генерацией в ОПЗ, а не утечкой по
+    поверхности или пробоем. τ₀^bg — из (5.10) с дислокационным вкладом.
+    Возвращает Tau0Estimate или None (причина — в diagnostics)."""
+    notes = diagnostics if diagnostics is not None else []
+    V_exp = np.asarray(V_exp, dtype=float)
+    I_exp = np.asarray(I_exp, dtype=float)
+    order = np.argsort(V_exp)
+    V_exp, I_exp = V_exp[order], I_exp[order]
+    if V_at >= 0 or not V_exp[0] <= V_at <= V_exp[-1]:
+        notes.append(f"нет экспериментальных точек при V = {V_at:g} В на обратной ветви")
+        return None
+    I_meas = abs(float(np.interp(V_at, V_exp, I_exp)))
+    physical = replace(s, model=MODEL_PHYSICAL)
+    I_rest = I_meas - abs(float(shunt_current(physical, V_at))) - abs(float(diffusion_current(physical, V_at)))
+    if I_rest <= 0:
+        notes.append("обратный ток не превышает сумму шунта и диффузионного тока модели — "
+                     "τ₀ по нему не оценить")
+        return None
+    W = float(depletion_width(physical, V_at))
+    factor = abs(float(_expm1(V_at / (s.n2 * s.Vt))))
+    area = float(gr_area(physical, V_at))
+    if s.sns_refinement:
+        factor *= float(sns_factor(physical, V_at))
+    tau0 = Q * s.ni * W * area * factor / (2.0 * I_rest)
+    inv_bg = 1.0 / tau0 - scr_sigma_R(physical) * s.N_dis
+    tau0_bg = 1.0 / inv_bg if inv_bg > 0 else float("nan")
+    if not np.isfinite(tau0_bg):
+        notes.append("дислокационный вклад σ_R·N_dis один даёт больше тока ОПЗ, чем измерено")
+    return Tau0Estimate(V=V_at, I_gr=I_rest, tau0=tau0, tau0_bg=tau0_bg)

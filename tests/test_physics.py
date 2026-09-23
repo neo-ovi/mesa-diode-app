@@ -469,3 +469,38 @@ def test_ideality_ignores_repeated_voltages():
     I2 = np.concatenate([I, I[::7]])
     result = ph.ideality_from_data(V2, I2, T300)
     assert result.n == pytest.approx(1.5, abs=0.01)
+
+
+# ------------------------------------------ эмпирическая модель и оценка τ₀ --
+
+def test_empirical_model_follows_6_3():
+    s = synth(model=ph.MODEL_EMPIRICAL, J0_emp=1e-5, n_emp=1.4, Rs=0.0, Rsh=float("inf"))
+    V = np.linspace(-0.5, 0.3, 17)
+    r = ph.solve_iv(s, V)
+    expected = s.area * 1e-5 * np.expm1(V / (1.4 * s.Vt))
+    assert np.allclose(r.I, expected, rtol=1e-12)
+    assert set(r.parts) == {"emp", "sh", "L"}
+
+
+def test_empirical_model_ideality_is_recovered():
+    s = synth(model=ph.MODEL_EMPIRICAL, J0_emp=1e-5, n_emp=1.3, Rs=0.0, Rsh=float("inf"))
+    V = np.linspace(0.0, 0.3, 121)
+    assert ph.ideality_from_data(V, ph.solve_iv(s, V).I, T300).n == pytest.approx(1.3, abs=1e-3)
+
+
+def test_tau0_estimate_recovers_model_lifetime():
+    truth = synth(tau0_bg=3e-8, N_dis=1e5, Rsh=1e7)
+    V = np.linspace(-2.0, 0.0, 81)
+    I = ph.solve_iv(truth, V).I
+    guess = synth(tau0_bg=1e-5, N_dis=1e5, Rsh=1e7)   # τ₀ неизвестно
+    est = ph.estimate_tau0_from_reverse(guess, V, I, -1.0)
+    assert est.tau0 == pytest.approx(ph.scr_lifetime(truth), rel=1e-3)
+    assert est.tau0_bg == pytest.approx(3e-8, rel=1e-3)
+
+
+def test_tau0_estimate_reports_when_current_is_shunt_only():
+    s = synth(Rsh=1e3)
+    V = np.linspace(-2.0, 0.0, 21)
+    notes = []
+    assert ph.estimate_tau0_from_reverse(s, V, V / 1e4, -1.0, notes) is None
+    assert notes

@@ -61,9 +61,38 @@ NUMERIC_PARAMS = [
     ParamSpec("Rsh", "шунт R_sh", "Ом", "Rsh"),
     ParamSpec("I_L", "нелинейная утечка I_L", "А", "I_L"),
     ParamSpec("m_leak", "показатель утечки m", "—", "m_leak"),
+    # Эмпирическая модель (6.3) — базовый режим.
+    ParamSpec("n_emp", "коэффициент идеальности n", "—", "n_emp"),
+    ParamSpec("J0_emp", "плотность тока насыщения J₀", "А/см²", "J0_emp"),
+    # Экспериментальные данные о дефектах: хранятся в наборе, в модель не входят
+    # (плотность дислокаций в модели — N_dis, её задаёт EPD).
+    ParamSpec("afm_rms_nm", "шероховатость RMS (АСМ)", "нм", None),
+    ParamSpec("afm_defects", "плотность дефектов (АСМ)", "см⁻²", None),
+    ParamSpec("xrd_fwhm", "полуширина кривой качания (XRD)", "угл. с", None),
 ]
 CHOICE_FIELDS = ("bc_A_n", "bc_A_p", "bc_B_n", "bc_B_p")
 FLAG_FIELDS = ("sns_refinement", "edge_area")
+
+# Режимы окна: базовый — эмпирическая модель (6.3); расширенный — физическая
+# модель, свободна геометрия слоёв; «Подгонка» — физическая модель, свободны
+# все параметры. Значения при переключении сохраняются, меняется только то,
+# какие поля доступны для правки.
+MODE_BASIC, MODE_EXTENDED, MODE_FIT = "basic", "extended", "fit"
+MODES = (MODE_BASIC, MODE_EXTENDED, MODE_FIT)
+MODE_LABELS = {MODE_BASIC: "Базовая модель", MODE_EXTENDED: "Расширенная модель",
+               MODE_FIT: "Подгонка"}
+MODE_MODEL = {MODE_BASIC: ph.MODEL_EMPIRICAL, MODE_EXTENDED: ph.MODEL_PHYSICAL,
+              MODE_FIT: ph.MODEL_PHYSICAL}
+BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T",
+                        "n_emp", "J0_emp", "Rs", "Rsh"})
+GEOMETRY_KEYS = frozenset({"d_epi_um", "d_n_um", "d_sub_um"})
+MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: BASIC_KEYS | GEOMETRY_KEYS,
+             MODE_FIT: frozenset(spec.key for spec in NUMERIC_PARAMS)}
+
+
+def editable_keys(mode):
+    """Числовые параметры, доступные для правки в режиме mode."""
+    return MODE_KEYS.get(mode, MODE_KEYS[MODE_FIT])
 
 # Нейтральные значения по умолчанию (не параметры какого-либо образца).
 DEFAULT_PARAMS = {
@@ -93,6 +122,12 @@ DEFAULT_PARAMS = {
     "Rsh": 1e6,
     "I_L": 0.0,
     "m_leak": 3.0,
+    "n_emp": 1.5,
+    "J0_emp": 1e-6,
+    "afm_rms_nm": 0.0,
+    "afm_defects": 0.0,
+    "xrd_fwhm": 0.0,
+    "mode": MODE_BASIC,
     "bc_A_n": ph.SINK,
     "bc_A_p": ph.SINK,
     "bc_B_n": ph.REFLECT,
@@ -139,7 +174,8 @@ def to_structure(params, scenario=None):
     kwargs.update({name: bool(merged[name]) for name in FLAG_FIELDS})
     if scenario is None:
         scenario = I_TYPE_TO_SCENARIO.get(merged["i_type"], ph.SCENARIO_B)
-    return ph.Structure(scenario=scenario, **kwargs)
+    model = MODE_MODEL.get(merged["mode"], ph.MODEL_PHYSICAL)
+    return ph.Structure(scenario=scenario, model=model, **kwargs)
 
 
 def save_preset(preset, path):
@@ -153,7 +189,11 @@ def load_preset(path):
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("format") != FORMAT:
         raise ValueError(f"{path.name}: не набор образца (ожидается format = {FORMAT!r})")
-    return Preset(name=data.get("name", path.stem), params=data.get("params", {}),
+    params = dict(data.get("params", {}))
+    # Наборы, сохранённые до появления режимов, заданы для физической модели
+    # целиком — открываются в «Подгонке».
+    params.setdefault("mode", MODE_FIT)
+    return Preset(name=data.get("name", path.stem), params=params,
                   metadata=data.get("metadata", {}),
                   files=data.get("files", {"iv": [], "cv": []}),
                   notes=data.get("notes", {}), reference=bool(data.get("reference")),

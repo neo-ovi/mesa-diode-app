@@ -504,3 +504,22 @@ def test_tau0_estimate_reports_when_current_is_shunt_only():
     notes = []
     assert ph.estimate_tau0_from_reverse(s, V, V / 1e4, -1.0, notes) is None
     assert notes
+
+
+def test_modes_select_model_and_editable_fields():
+    basic = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC})
+    assert basic.model == ph.MODEL_EMPIRICAL
+    for mode in (presets.MODE_EXTENDED, presets.MODE_FIT):
+        assert presets.to_structure({"mode": mode}).model == ph.MODEL_PHYSICAL
+    assert presets.editable_keys(presets.MODE_BASIC) < presets.editable_keys(presets.MODE_EXTENDED)
+    assert presets.editable_keys(presets.MODE_EXTENDED) < presets.editable_keys(presets.MODE_FIT)
+    assert {"d_epi_um", "d_n_um", "d_sub_um"} <= presets.editable_keys(presets.MODE_EXTENDED)
+    assert presets.editable_keys(presets.MODE_FIT) == {s.key for s in presets.NUMERIC_PARAMS}
+
+
+def test_preset_without_mode_opens_in_fit_mode(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text('{"format": "mesa-diode-preset/1", "params": {"N_i": 1e15}}', encoding="utf-8")
+    preset = presets.load_preset(path)
+    assert preset.params["mode"] == presets.MODE_FIT
+    assert presets.to_structure(preset.params).model == ph.MODEL_PHYSICAL

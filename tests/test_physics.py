@@ -113,3 +113,62 @@ def test_diffusion_coefficient_and_length():
     D = ph.diffusion_coefficient(GE.mu_n_max, T300)
     assert rel(D, ph.thermal_voltage(T300) * 3900.0, 1e-12)
     assert rel(ph.diffusion_length(D, 1e-6), np.sqrt(D * 1e-6), 1e-12)
+
+
+# ------------------------------------------------------------------ §3 --
+# Синтетическая структура для проверок свойств модели. Эталоны ТЗ §9
+# (наборы Э1, Э0) — в tests/test_reference_sets.py через MESA_DATA_DIR.
+
+UM = 1e-4
+
+
+def synth(**overrides):
+    params = dict(D=400 * UM, d_epi=3.2 * UM, h=3.2 * UM, d_n=0.4 * UM, d_sub=300 * UM,
+                  ND_plus=5e17, N_i=5e15, rho_sub=5.0, scenario=ph.SCENARIO_A,
+                  N_dis=0.0, Rs=10.0, Rsh=1e6, vbi_method=ph.VBI_BOLTZMANN)
+    params.update(overrides)
+    return ph.Structure(**params)
+
+
+
+
+def test_inv_c2_slope_gives_n_eff_and_cutoff():
+    s = synth()
+    V = np.linspace(-1.0, 0.0, 41)
+    N, V0 = ph.fit_inv_c2(V, ph.capacitance(s, V), s.area, s.eps)
+    assert rel(N, s.N_eff, 1e-9)
+    assert rel(V0, ph.c2_cutoff(s), 1e-9)
+    assert rel(ph.c2_cutoff(s), s.Vbi - 2 * s.Vt, 1e-12)
+
+
+def test_capacitance_is_eps_area_over_width_and_nan_near_vbi():
+    s = synth()
+    assert rel(ph.capacitance(s, -0.5), s.eps * s.area / ph.depletion_width(s, -0.5), 1e-12)
+    assert np.isnan(ph.capacitance(s, s.Vbi - 2.9 * s.Vt))
+
+
+def test_depletion_edges_charge_neutrality():
+    s = synth()
+    xn, xp = ph.depletion_edges(s, -1.0)
+    assert rel(xn * s.n_side.N, xp * s.p_side.N, 1e-12)
+    assert rel(xn + xp, ph.depletion_width(s, -1.0), 1e-12)
+
+
+def test_vbi_degenerate_matches_boltzmann_for_nondegenerate_layers():
+    s = synth(ND_plus=1e16, N_i=1e15)
+    assert s.eta[0] < -3 and s.eta[1] < -3
+    v31 = ph.built_in_potential(s, ph.VBI_BOLTZMANN)
+    v31a = ph.built_in_potential(s, ph.VBI_DEGENERATE)
+    assert v31a == pytest.approx(v31, rel=2e-3)
+
+
+def test_scenario_mapping():
+    a = synth()
+    assert (a.n_side.layer, a.p_side.layer) == ("n+", "i")
+    assert a.z_j == pytest.approx(0.4 * UM)
+    assert rel(a.p_side.thickness, 2.8 * UM, 1e-12)
+    b = a.with_scenario(ph.SCENARIO_B)
+    assert (b.n_side.layer, b.p_side.layer) == ("i", "sub")
+    assert b.z_j == pytest.approx(3.2 * UM)
+    assert b.n_side.boundary == ph.REFLECT
+    assert rel(ph.resistivity(b.p_side.N, 300.0), 5.0, 1e-6)

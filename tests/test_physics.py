@@ -421,3 +421,51 @@ def test_auto_window_keeps_at_least_three_points_on_sparse_data():
     result = ph.ideality_from_data(Vj + I * 3e5, I, T300)  # сильный изгиб от R_s
     assert result is not None
     assert ((result.V_local >= result.V1) & (result.V_local <= result.V2)).sum() >= 3
+
+
+# ------------------------------------- идеальность: реальные условия данных --
+
+def _dense_iv(n=1.5, I0=2e-6, Rs=120.0, noise=0.0, seed=1, vmax=1.5):
+    """Плотная ВАХ диода с заметным R_s (синтетика, не данные образца)."""
+    from scipy.optimize import brentq
+    Vt = ph.thermal_voltage(T300)
+
+    def current(V):
+        return brentq(lambda I: I - I0 * np.expm1(np.clip((V - I * Rs) / (n * Vt), -700, 700)), -1, 1)
+
+    V = np.linspace(-1.0, vmax, 2500)
+    I = np.array([current(v) for v in V])
+    if noise:
+        I = I * (1 + noise * np.random.default_rng(seed).standard_normal(I.size))
+    return V, I
+
+
+def test_ideality_dense_noisy_data_with_correct_rs():
+    V, I = _dense_iv(noise=0.01)
+    notes = []
+    result = ph.ideality_from_data(V, I, T300, Rs=120.0, diagnostics=notes)
+    assert result.n == pytest.approx(1.5, abs=0.02)
+    assert notes == []
+
+
+def test_ideality_reports_overestimated_rs():
+    V, I = _dense_iv()
+    notes = []
+    result = ph.ideality_from_data(V, I, T300, Rs=500.0, diagnostics=notes)
+    assert any("завышено" in note for note in notes)
+    assert result is None or result.n < 1.5
+
+
+def test_ideality_reports_reason_when_no_forward_points():
+    notes = []
+    assert ph.ideality_from_data(np.array([-1.0, -0.5]), np.array([-1e-6, -5e-7]), T300,
+                                 diagnostics=notes) is None
+    assert notes and "прямой ветви" in notes[0]
+
+
+def test_ideality_ignores_repeated_voltages():
+    V, I = _dense_iv(Rs=0.0, vmax=0.4)
+    V2 = np.concatenate([V, V[::7]])
+    I2 = np.concatenate([I, I[::7]])
+    result = ph.ideality_from_data(V2, I2, T300)
+    assert result.n == pytest.approx(1.5, abs=0.01)

@@ -721,12 +721,31 @@ class IdealityResult:
 
 
 def local_ideality(V, I, T):
-    """(6.4)/(6.5) n = [(kT/q)·d ln I/dV]⁻¹ центральными разностями —
-    [Ман20, с. 46, ур. (4), (5)]."""
-    return 1.0 / (thermal_voltage(T) * np.gradient(np.log(I), V))
+    """(6.4)/(6.5) n = [(kT/q)·Δln I/ΔV]⁻¹ центральными разностями —
+    [Ман20, с. 46, ур. (4), (5)].
+
+    Разность берётся по точкам, отстоящим не меньше чем на kT/q (на плотных
+    данных соседние точки дали бы производную шума); на редких данных — по
+    соседним точкам. V должно быть отсортировано по возрастанию."""
+    V = np.asarray(V, dtype=float)
+    lnI = np.log(np.asarray(I, dtype=float))
+    Vt = thermal_voltage(T)
+    if V.size < 3:
+        return 1.0 / (Vt * np.gradient(lnI, V))
+    step = float(np.median(np.diff(V)))
+    k = max(1, int(np.ceil(Vt / step / 2.0))) if step > 0 else 1
+    idx = np.arange(V.size)
+    lo = np.clip(idx - k, 0, V.size - 1)
+    hi = np.clip(idx + k, 0, V.size - 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (V[hi] - V[lo]) / (Vt * (lnI[hi] - lnI[lo]))
 
 
-def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
+N_RISE_RUN = 3        # рост должен держаться ≥ 3 точек подряд (одиночный шум не закрывает окно)
+N_FIT_BOUNDS = (0.3, 20.0)
+
+
+def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None, diagnostics=None):
     """Коэффициент идеальности по прямой ветви (алгоритм §6.3).
 
     1) V > 0, I > 0; при R_s > 0 V заменяется на V − I·R_s;
@@ -735,32 +754,70 @@ def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
        [V₁; V] более чем на 20 % (правило ТЗ); window = (V₁, V₂) задаёт окно вручную;
     4) n ± δn — подгонка (6.3) I = I₀[exp(qV/nkT) − 1] по ln I (curve_fit)
        [Ман20, с. 45, ур. (2)].
-    Возвращает IdealityResult или None, если точек меньше трёх."""
+
+    Реализация: после поправки на R_s остаётся только участок, где V − I·R_s > 0
+    и растёт вместе с V (иначе R_s завышено); рост n на 20 % засчитывается,
+    если держится не менее трёх точек подряд; окно — не менее трёх точек.
+    Возвращает IdealityResult или None; причина неудачи и замечания
+    добавляются в список diagnostics, если он передан."""
     from scipy.optimize import curve_fit
+
+    notes = diagnostics if diagnostics is not None else []
+
+    def fail(reason):
+        notes.append(reason)
+        return None
 
     V = np.asarray(V, dtype=float)
     I = np.asarray(I, dtype=float)
     mask = np.isfinite(V) & np.isfinite(I) & (V > 0) & (I > 0)
     V, I = V[mask], I[mask]
+    V, first = np.unique(V, return_index=True)   # сортировка и удаление повторов V
+    I = I[first]
     if V.size < 3:
-        return None
-    Vj = V - I * Rs if Rs > 0 else V.copy()
-    order = np.argsort(Vj)
-    Vj, I = Vj[order], I[order]
+        return fail("в прямой ветви меньше трёх точек с V > 0 и I > 0")
+
     Vt = thermal_voltage(T)
+    Vj = V - I * Rs if Rs > 0 else V.copy()
+    if Rs > 0:
+        # Перегиб: V − I·R_s устойчиво убывает на последних 20 % точек (наклон
+        # прямой по ним < 0) — R_s завышено; шум отдельных точек так не срабатывает.
+        tail = max(5, Vj.size // 5)
+        if Vj.size >= 5 and np.polyfit(V[-tail:], Vj[-tail:], 1)[0] < 0:
+            peak = int(np.argmax(Vj))
+            notes.append(f"R_s = {Rs:g} Ом, вероятно, завышено: при V > {V[peak]:.3g} В "
+                         "напряжение на переходе V − I·R_s убывает; эти точки не используются.")
+            V, I, Vj = V[:peak + 1], I[:peak + 1], Vj[:peak + 1]
+        # мелкое дрожание от шума тока: оставляем только точки, где V − I·R_s растёт
+        rising = Vj >= np.maximum.accumulate(Vj)
+        V, I, Vj = V[rising], I[rising], Vj[rising]
+        Vj, first = np.unique(Vj, return_index=True)
+        V, I = V[first], I[first]
+        positive = Vj > 0
+        V, I, Vj = V[positive], I[positive], Vj[positive]
+        if Vj.size < 3:
+            return fail(f"после поправки V − I·R_s (R_s = {Rs:g} Ом) осталось меньше трёх "
+                        "точек: уменьшите R_s или задайте окно V₁…V₂ вручную")
     n_loc = local_ideality(Vj, I, T)
 
     if window is None:
         V1 = 3.0 * Vt
         V2 = Vj[-1]
         running = np.inf
+        run = 0
         for v, n in zip(Vj, n_loc):
             if v < V1 or not np.isfinite(n) or n <= 0:
                 continue
-            running = min(running, n)
             if n > (1.0 + N_RISE) * running:
-                V2 = v
-                break
+                run += 1
+                if run == 1:
+                    first_high = v
+                if run >= N_RISE_RUN:
+                    V2 = first_high
+                    break
+            else:
+                run = 0
+                running = min(running, n)
         # Подгонка двух параметров требует не менее трёх точек: на редких
         # данных окно по правилу 20 % расширяется до третьей точки от V₁.
         above = Vj[Vj >= V1]
@@ -770,7 +827,7 @@ def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
         V1, V2 = window
     sel = (Vj >= V1) & (Vj <= V2)
     if sel.sum() < 3:
-        return None
+        return fail(f"в окне V₁…V₂ = {V1:.3g}…{V2:.3g} В меньше трёх точек прямой ветви")
     x, y = Vj[sel], np.log(I[sel])
 
     def model(v, lnI0, n):
@@ -778,13 +835,21 @@ def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
 
     slope, intercept = np.polyfit(x, y, 1)
     n0 = 1.0 / (Vt * slope) if slope > 0 else 1.5
+    n0 = min(max(n0, N_FIT_BOUNDS[0] * 1.01), N_FIT_BOUNDS[1] * 0.99)
     try:
         popt, pcov = curve_fit(model, x, y, p0=(intercept, n0),
-                               bounds=([-200.0, 0.3], [50.0, 20.0]))
+                               bounds=([-200.0, N_FIT_BOUNDS[0]], [50.0, N_FIT_BOUNDS[1]]))
     except (RuntimeError, ValueError):
-        return None
+        return fail("подгонка (6.3) не сошлась в выбранном окне")
+    n = float(popt[1])
+    if not N_FIT_BOUNDS[0] * 1.001 < n < N_FIT_BOUNDS[1] * 0.999:
+        return fail(f"подгонка (6.3) упёрлась в границу n = {n:.3g}: окно "
+                    f"{V1:.3g}…{V2:.3g} В не подходит — проверьте R_s или задайте окно вручную")
+    if n < 1.0:
+        notes.append(f"n = {n:.3g} < 1 физически невозможно для диода — вероятно, завышено R_s "
+                     "или неудачно окно V₁…V₂.")
     dn = float(np.sqrt(pcov[1, 1])) if np.isfinite(pcov[1, 1]) else float("nan")
-    return IdealityResult(n=float(popt[1]), dn=dn, I0=float(np.exp(popt[0])),
+    return IdealityResult(n=n, dn=dn, I0=float(np.exp(popt[0])),
                           V1=float(V1), V2=float(V2), V_local=Vj, n_local=n_loc)
 
 

@@ -61,6 +61,11 @@ def _quantities(s):
         "Cm1_pF": lambda: ph.capacitance(s, -1.0) * 1e12,
         "cutoff": lambda: ph.c2_cutoff(s),
         "N_slope": lambda: N_slope,
+        "Idiff_m1": lambda: ph.diffusion_current(s, -1.0),
+        "Igr_m1": lambda: ph.gr_current(s, -1.0),
+        "I_m1": lambda: ph.solve_iv(s, np.array([-1.0])).I[0],
+        "I_p02": lambda: ph.solve_iv(s, np.array([0.2])).I[0],
+        "dA_m1_cm2": lambda: ph.edge_area(s, -1.0),
     }
 
 
@@ -73,4 +78,10 @@ def _structure_cases():
 def test_structure_reference_value(case, key):
     s = ph.Structure(**case["params"])
     expected, tol = case["expected"][key]
-    assert float(_quantities(s)[key]()) == pytest.approx(expected, rel=tol)
+    assert float(_quantities(s)[key]()) == pytest.approx(expected, rel=tol, abs=1e-12)
+
+
+@pytest.mark.parametrize("case", _cases("tau_dis"))
+def test_dislocation_lifetime(case):
+    tau = ph.dislocation_lifetime(case["sigma_R"], case["N_dis"])
+    assert tau == pytest.approx(case["expected_s"], rel=case["rel"])

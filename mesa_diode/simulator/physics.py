@@ -392,3 +392,243 @@ def estimate_grading_m(V, C, vbi_prime):
     if slope >= 0:
         return None, slope
     return -1.0 / slope - 2.0, slope
+
+
+# ------------------------------------------- §1. Геометрия и изоляция --
+
+def edge_area(s, V):
+    """(1.3) Добавочная площадь ОПЗ ΔA ≈ πD·max(0, x_p(V) − (h − z_j)), см² —
+    оценка ТЗ (геометрическая). Для сценария B (z_j = d_epi) это
+    πD·max(0, x_p − (h − d_epi)); в сценарии A ОПЗ, как правило, внутри мезы."""
+    _, xp = depletion_edges(s, V)
+    return np.pi * s.D * np.maximum(0.0, xp - (s.h - s.z_j))
+
+
+def side_wall_area(s):
+    """Площадь боковой стенки S_side = πDh, см² (справочно, для бэклога Б-3)."""
+    return np.pi * s.D * s.h
+
+
+# ------------------------------------------ §5А. Дислокации и время жизни --
+
+def dislocation_lifetime(sigma_R, N_dis):
+    """τ_dis = 1/(σ_R·N_dis), с — из [KKA56, с. 1289, ур. (3)]: λ = σ_R·N_D·ΔP."""
+    return float("inf") if N_dis <= 0 else 1.0 / (sigma_R * N_dis)
+
+
+def minority_lifetime(side, N_dis):
+    """(5.9) 1/τ = 1/τ^bg + σ_R·N_dis: каналы рекомбинации складываются;
+    второе слагаемое — [KKA56, ур. (3)]."""
+    return 1.0 / (1.0 / side.tau_bg + side.sigma_R * N_dis)
+
+
+def scr_sigma_R(s):
+    """σ_R слоя, в котором лежит бо́льшая часть ОПЗ (x_p > x_n ⇔ N_D > N_A)."""
+    return s.p_side.sigma_R if s.n_side.N > s.p_side.N else s.n_side.sigma_R
+
+
+def scr_lifetime(s):
+    """(5.10) 1/τ₀ = 1/τ₀^bg + σ_R·N_dis — допущение модели: перенос
+    [KKA56, ур. (3)] (объёмное время жизни) на ОПЗ."""
+    return 1.0 / (1.0 / s.tau0_bg + scr_sigma_R(s) * s.N_dis)
+
+
+# --------------------------------------------------- §4. Диффузионный ток --
+
+W_MIN = 1e-7      # см (1 нм): минимальная толщина нейтральной базы при смыкании
+U_SMALL = 1e-6    # при u < 10⁻⁶: coth u = 1/u, tanh u = u
+U_LARGE = 20.0    # при u > 20: f = 1
+
+
+def boundary_factor(u, boundary):
+    """f(w/L) в (4.3): 1 — длинная база [Зи, ур. (40)]; coth — «сток»,
+    Δn(w) = 0 [Ш49, с. 470, ур. (5.5)]; tanh — «отражение», dΔn/dx(w) = 0
+    [Ш49, с. 470, ур. (5.6) при p₁ = p₂]."""
+    u = np.asarray(u, dtype=float)
+    if boundary == LONG:
+        return np.ones_like(u)
+    small = u < U_SMALL
+    safe = np.where(small, U_SMALL, u)
+    if boundary == SINK:
+        f = np.where(small, 1.0 / np.maximum(u, 1e-300), 1.0 / np.tanh(safe))
+    elif boundary == REFLECT:
+        f = np.where(small, u, np.tanh(safe))
+    else:
+        raise ValueError(f"неизвестное граничное условие: {boundary!r}")
+    return np.where(u > U_LARGE, 1.0, f)
+
+
+def neutral_widths(s, V):
+    """Толщины нейтральных баз w_n = d_n-стороны − x_n(V), w_p = d_p-стороны − x_p(V), см.
+    Возвращает (w_n, w_p, смыкание) — w ограничены снизу W_MIN."""
+    xn, xp = depletion_edges(s, V)
+    wn = s.n_side.thickness - xn
+    wp = s.p_side.thickness - xp
+    punch = bool(np.any(wn <= 0) or np.any(wp <= 0))
+    return np.maximum(wn, W_MIN), np.maximum(wp, W_MIN), punch
+
+
+def minority_transport(s):
+    """D и L неосновных: дырки в n-области, электроны в p-области (2.5), (2.6), τ по (5.9).
+    Возвращает ((D_p, L_p), (D_n, L_n))."""
+    Dp = diffusion_coefficient(s.n_side.mu_minority, s.T)
+    Dn = diffusion_coefficient(s.p_side.mu_minority, s.T)
+    Lp = diffusion_length(Dp, minority_lifetime(s.n_side, s.N_dis))
+    Ln = diffusion_length(Dn, minority_lifetime(s.p_side, s.N_dis))
+    return (Dp, Lp), (Dn, Ln)
+
+
+def saturation_current_density_parts(s, V):
+    """(4.3) Слагаемые J_s(V): дырки в n-области и электроны в p-области, А/см².
+    J_s = qD_p·p_n0/L_p·f(w_n/L_p) + qD_n·n_p0/L_n·f(w_p/L_n) —
+    [Зи, с. 94, ур. (44), (45)]; [Ш49, с. 460, ур. (4.13)]."""
+    (Dp, Lp), (Dn, Ln) = minority_transport(s)
+    p_n0, n_p0 = s.minority
+    wn, wp, _ = neutral_widths(s, V)
+    holes = Q * Dp * p_n0 / Lp * boundary_factor(wn / Lp, s.n_side.boundary)
+    electrons = Q * Dn * n_p0 / Ln * boundary_factor(wp / Ln, s.p_side.boundary)
+    return holes, electrons
+
+
+def saturation_current_density(s, V):
+    """(4.3) J_s(V), А/см²."""
+    holes, electrons = saturation_current_density_parts(s, V)
+    return holes + electrons
+
+
+EXP_LIMIT = 700.0  # защита exp от переполнения
+
+
+def _expm1(x):
+    return np.expm1(np.clip(x, -EXP_LIMIT, EXP_LIMIT))
+
+
+def diffusion_current(s, V):
+    """(4.4) I_diff = A·J_s(V)·(e^{qV/kT} − 1), А."""
+    V = np.asarray(V, dtype=float)
+    return s.area * saturation_current_density(s, V) * _expm1(V / s.Vt)
+
+
+# ------------------------------------- §5. Генерация–рекомбинация в ОПЗ --
+
+def sns_factor(s, V):
+    """(5.5) Опция «уточнение SNS»: F = min{1, π(kT/q)/(V_bi − V)} при V ≥ 3kT/q —
+    [СНШ57, с. 1231, ур. (15), (16)]; на 0 < V < 3kT/q — линейная
+    интерполяция от 1 (интерполяция); при V ≤ 0 F = 1."""
+    V = np.asarray(V, dtype=float)
+
+    def F(v):
+        gap = s.Vbi - v
+        return np.where(gap > np.pi * s.Vt, np.pi * s.Vt / np.where(gap > 0, gap, 1.0), 1.0)
+
+    v3 = 3.0 * s.Vt
+    F3 = F(v3)
+    return np.where(V >= v3, F(V), np.where(V > 0, 1.0 + (F3 - 1.0) * V / v3, 1.0))
+
+
+def gr_area(s, V):
+    """Площадь для тока ОПЗ: A или A + ΔA (1.3) при включённой опции."""
+    return s.area + edge_area(s, V) if s.edge_area else s.area * np.ones_like(np.asarray(V, dtype=float))
+
+
+def gr_current(s, V):
+    """(5.4) I_gr = A·q·n_i·W(V)/(2τ₀)·(e^{qV/n₂kT} − 1), А.
+
+    При n₂ = 2 при обратном смещении это [СНШ57, с. 1230, ур. (11)] =
+    [Зи, с. 97, ур. (48)], при прямом — [Зи, с. 99, ур. (54)] (верхняя
+    оценка). n₂ ≠ 2 — эмпирика (5.6) [Ман20, с. 45–46]; τ₀ по (5.10)."""
+    V = np.asarray(V, dtype=float)
+    J = Q * s.ni * depletion_width(s, V) / (2.0 * scr_lifetime(s)) * _expm1(V / (s.n2 * s.Vt))
+    if s.sns_refinement:
+        J = J * sns_factor(s, V)
+    return gr_area(s, V) * J
+
+
+# -------------------------------------------------- §6. Полный ток (6.1) --
+
+def shunt_current(s, V):
+    """V_d/R_sh, А — [Зи, с. 97, п. 1]."""
+    V = np.asarray(V, dtype=float)
+    return V / s.Rsh if np.isfinite(s.Rsh) else np.zeros_like(V)
+
+
+def leak_current(s, V):
+    """I_L·sign(V_d)·|V_d/1 В|^m, А — мягкая обратная ВАХ [Кур74, с. 167–168]; эмпирика."""
+    V = np.asarray(V, dtype=float)
+    return s.I_L * np.sign(V) * np.abs(V) ** s.m_leak
+
+
+def components(s, Vd):
+    """Компоненты тока (6.1) при напряжении на переходе V_d: I_diff, I_gr, I_sh, I_L, А."""
+    return {
+        "diff": diffusion_current(s, Vd),
+        "gr": gr_current(s, Vd),
+        "sh": shunt_current(s, Vd),
+        "L": leak_current(s, Vd),
+    }
+
+
+def junction_current(s, Vd):
+    """Сумма компонент (6.1) при напряжении на переходе V_d, А."""
+    return sum(components(s, Vd).values())
+
+
+@dataclass
+class IVResult:
+    V: np.ndarray
+    I: np.ndarray
+    Vd: np.ndarray
+    parts: dict
+    warnings: list
+
+
+MAX_NEWTON = 100
+
+
+def _solve_point(s, V, I_guess):
+    """Ньютон по I для I = F(V − I·R_s); шаг ограничен так, что |ΔI·R_s| ≤ 2kT/q."""
+    if s.Rs == 0:
+        return float(junction_current(s, V)), True
+    I = I_guess
+    max_dv = 2.0 * s.Vt
+    for _ in range(MAX_NEWTON):
+        Vd = V - I * s.Rs
+        F = float(junction_current(s, Vd))
+        h = 1e-6
+        dF = float(junction_current(s, Vd + h) - junction_current(s, Vd - h)) / (2 * h)
+        g = I - F
+        step = -g / (1.0 + s.Rs * dF)
+        if abs(step) * s.Rs > max_dv:
+            step = np.sign(step) * max_dv / s.Rs
+        I += step
+        if abs(step) <= 1e-10 * abs(I) + 1e-18:
+            return I, True
+    return float("nan"), False
+
+
+def solve_iv(s, V):
+    """(6.1) I = I_diff(V_d) + I_gr(V_d) + V_d/R_sh + I_L·sign(V_d)|V_d/1 В|^m, V_d = V − I·R_s.
+
+    Ньютон по I с ограничением шага; развёртка от V = 0 к краям (решение
+    соседней точки — начальное приближение); не более 100 итераций; при
+    несходимости — NaN и предупреждение. R_s — [Зи, с. 97, п. 5; рис. 21, с. 99]."""
+    V = np.asarray(V, dtype=float)
+    I = np.full_like(V, np.nan)
+    order = np.argsort(np.abs(V))
+    failed = []
+    # два прохода от V ≈ 0: вверх и вниз, чтобы начальное приближение было соседним
+    for sign in (1, -1):
+        guess = 0.0
+        for idx in sorted((i for i in order if np.sign(V[i]) in (sign, 0)),
+                          key=lambda i: abs(V[i])):
+            value, ok = _solve_point(s, float(V[idx]), guess)
+            I[idx] = value
+            if ok:
+                guess = value
+            else:
+                failed.append(float(V[idx]))
+    Vd = V - np.nan_to_num(I) * s.Rs
+    warnings = []
+    if failed:
+        warnings.append(f"Решатель (6.1) не сошёлся в {len(failed)} точках — там NaN.")
+    return IVResult(V=V, I=I, Vd=Vd, parts=components(s, Vd), warnings=warnings)

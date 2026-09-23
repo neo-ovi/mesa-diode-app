@@ -172,3 +172,93 @@ def test_scenario_mapping():
     assert b.z_j == pytest.approx(3.2 * UM)
     assert b.n_side.boundary == ph.REFLECT
     assert rel(ph.resistivity(b.p_side.N, 300.0), 5.0, 1e-6)
+
+
+# ------------------------------------------------------ §4, §5, §5А, §6.1 --
+
+def test_long_base_equals_sze_eq_43():
+    s = synth(bc_A_n=ph.LONG, bc_A_p=ph.LONG)
+    (Dp, Lp), (Dn, Ln) = ph.minority_transport(s)
+    p_n0, n_p0 = s.minority
+    sze_43 = ph.Q * Dp * p_n0 / Lp + ph.Q * Dn * n_p0 / Ln
+    assert rel(float(ph.saturation_current_density(s, -1.0)), sze_43, 1e-6)
+
+
+def test_thick_base_sink_tends_to_long_base():
+    thick = synth(d_epi=0.4 * UM + 5000 * UM)
+    long_base = synth(d_epi=0.4 * UM + 5000 * UM, bc_A_p=ph.LONG)  # толстая только p-сторона
+    assert rel(float(thick.area * ph.saturation_current_density(thick, 0.0)),
+               float(long_base.area * ph.saturation_current_density(long_base, 0.0)), 1e-3)
+
+
+def test_short_base_limits():
+    u = np.array([1e-3])
+    assert rel(ph.boundary_factor(u, ph.SINK)[0], 1.0 / np.tanh(1e-3), 1e-9)
+    assert rel(ph.boundary_factor(u, ph.REFLECT)[0], np.tanh(1e-3), 1e-9)
+    assert ph.boundary_factor(np.array([1e-8]), ph.SINK)[0] == pytest.approx(1e8)
+    assert ph.boundary_factor(np.array([25.0]), ph.REFLECT)[0] == 1.0
+
+
+def test_reflect_short_base_gives_q_n_w_over_tau():
+    s = synth(bc_A_n=ph.REFLECT, bc_A_p=ph.REFLECT)
+    (Dp, Lp), (Dn, Ln) = ph.minority_transport(s)
+    _, electrons = ph.saturation_current_density_parts(s, -1.0)
+    _, wp, _ = ph.neutral_widths(s, -1.0)
+    tau_n = ph.minority_lifetime(s.p_side, s.N_dis)
+    assert rel(float(electrons), ph.Q * s.minority[1] * float(wp) / tau_n, 2e-3)
+
+
+def test_gr_current_vanishes_for_infinite_scr_lifetime():
+    s = synth(tau0_bg=1e30)
+    assert abs(float(ph.gr_current(s, -1.0))) < 1e-25
+
+
+def test_sum_of_components_without_parasitics():
+    s = synth(Rs=0.0, Rsh=float("inf"), I_L=0.0)
+    V = np.linspace(-1.0, 0.3, 27)
+    r = ph.solve_iv(s, V)
+    assert np.allclose(r.I, ph.diffusion_current(s, V) + ph.gr_current(s, V), rtol=1e-12)
+
+
+def test_zero_bias_zero_current_and_monotonic():
+    s = synth(I_L=1e-6)
+    V = np.linspace(-2.0, 0.4, 97)
+    r = ph.solve_iv(s, V)
+    assert r.warnings == []
+    assert abs(r.I[np.argmin(np.abs(V))]) < 1e-15
+    assert np.all(np.diff(r.I) > 0)
+
+
+def test_series_resistance_voltage_drop_is_consistent():
+    s = synth()
+    r = ph.solve_iv(s, np.array([0.2]))
+    assert rel(r.I[0], float(ph.junction_current(s, 0.2 - r.I[0] * s.Rs)), 1e-9)
+
+
+def test_lifetimes_with_dislocations():
+    s = synth(N_dis=1e6)
+    assert rel(ph.minority_lifetime(s.p_side, s.N_dis),
+               1.0 / (1.0 / 1e-6 + s.sigma_R_epi * 1e6), 1e-12)
+    assert rel(ph.dislocation_lifetime(3.5e-3, 1e6), 1.0 / 3.5e3, 1e-12)
+    assert ph.dislocation_lifetime(3.5e-3, 0.0) == float("inf")
+
+
+def test_scr_sigma_follows_layer_with_larger_part_of_scr():
+    a = synth()                                   # N_D⁺ ≫ N_i: ОПЗ в i-слое (p)
+    assert ph.scr_sigma_R(a) == a.p_side.sigma_R
+    b = synth(sigma_R_sub=1.0).with_scenario(ph.SCENARIO_B)  # N_i ≫ N_sub: ОПЗ в подложке
+    assert ph.scr_sigma_R(b) == 1.0
+
+
+def test_sns_factor_is_continuous_and_bounded():
+    s = synth()
+    V = np.linspace(-0.5, s.Vbi, 200)
+    F = ph.sns_factor(s, V)
+    assert np.all(F <= 1.0 + 1e-12) and np.all(F > 0)
+    assert np.all(F[V <= 0] == 1.0)
+    v3 = 3 * s.Vt
+    assert ph.sns_factor(s, v3 - 1e-9) == pytest.approx(float(ph.sns_factor(s, v3)), rel=1e-6)
+
+
+def test_edge_area_zero_when_scr_inside_mesa():
+    assert float(ph.edge_area(synth(), -1.0)) == 0.0

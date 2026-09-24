@@ -520,6 +520,11 @@ PARAMETER_USE = {
     "afm_rms_nm": "в расчёт не входит, хранится в наборе",
     "afm_defects": "в расчёт не входит, хранится в наборе",
     "xrd_fwhm": "в расчёт не входит, хранится в наборе",
+    "hall_mu": "в расчёт не входит, хранится в наборе",
+    "implant_dose": "оценка N_{D}⁺ ≈ Q/d_{n} при автофите",
+    "implant_energy": "в расчёт не входит, хранится в наборе",
+    "anneal_T": "в расчёт не входит, хранится в наборе",
+    "growth_T": "в расчёт не входит, хранится в наборе",
 }
 
 
@@ -542,15 +547,19 @@ def table_values():
     """Табличные значения, которые программа подставляет (строки текста)."""
     rows = [
         f"μ_{{n}} (электроны) = {GE.mu_n_max:g} см²/(В·с); μ_{{p}} (дырки) = {GE.mu_p_max:g} см²/(В·с) — "
-        f"Ge, 300 К, чистый материал (верхний предел решёточной подвижности) [{GE.source['mu']}]. "
-        "Программа берёт их как значения по умолчанию для всех слоёв; при сильном легировании "
-        "реальная подвижность ниже — её можно уменьшить в «Подгонке».",
+        f"Ge, 300 К, чистый материал: подвижность, ограниченная только рассеянием на колебаниях "
+        f"решётки [{GE.source['mu']}]. Почему именно они: модели нужны подвижности неосновных "
+        "носителей, их не измеряют (Холл даёт подвижность основных); формулы зависимости μ от "
+        "легирования в модели нет. Поэтому по умолчанию для всех слоёв берётся верхний предел, а "
+        "в легированных и дефектных слоях его уменьшают вручную в «Подгонке». "
+        "Подробнее: методичка, п. 1А.5.",
     ]
     for name, value in SIGMA_R.items():
         rows.append(f"σ_{{R}}: {name} — {value:g} см²/с")
     rows.append(f"Источник σ_{{R}}: {SIGMA_R_SOURCE}. По умолчанию: i-слой и n⁺ — "
-                f"{presets.DEFAULT_PARAMS['sigma_R_epi']:g}, подложка — "
-                f"{presets.DEFAULT_PARAMS['sigma_R_sub']:g} см²/с.")
+                f"{presets.DEFAULT_PARAMS['sigma_R_epi']:g} (низкоомный Ge), подложка — "
+                f"{presets.DEFAULT_PARAMS['sigma_R_sub']:g} см²/с (высокоомный Ge). "
+                "Подробнее: методичка, п. 1А.5 и гл. 10А.")
     return rows
 
 
@@ -566,11 +575,14 @@ def fit_guide():
         paragraphs = [about]
         for key in keys:
             spec = specs[key]
-            paragraphs.append(f"• {spec.label}, {spec.unit} [{parameter_modes(key)}] — {hints.PARAM_HINTS[key]}")
+            paragraphs.append(f"• {spec.label}, {spec.unit} [{parameter_modes(key)}] — "
+                              f"{hints.PARAM_HINTS[key]} {hints.reference(key)}".rstrip())
         sections.append((title, paragraphs))
     sections.append(("Граничные условия: сток, отражение, длинная база", [
         text for text in hints.BOUNDARY_HINTS.values()] + [SCENARIO_BOUNDARIES, "Выбираются в расширенном режиме и в «Подгонке»; формулы — §4."]))
-    sections.append(("Табличные значения", table_values()))
+    sections.append(("Табличные значения и почему именно они", table_values()))
+    sections.append(("Автофит и пустые поля", [hints.AUTOFIT_HINT + " " + hints.reference("autofit")]))
+    sections.append(("V_{bi} и строка статуса", [hints.STATUS_HINT + " " + hints.reference("vbi")]))
     sections.append(("Что измеряется и что рассчитывается",
                      [f"• {what}: {result}" for what, result in hints.MEASUREMENTS]))
     return sections

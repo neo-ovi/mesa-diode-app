@@ -757,6 +757,27 @@ def local_ideality(V, I, T):
         return (V[hi] - V[lo]) / (Vt * (lnI[hi] - lnI[lo]))
 
 
+def series_resistance_limit(V, I):
+    """Наибольшее R_s, при котором напряжение на переходе V_j = V − I·R_s ещё
+    растёт вместе с V на верху прямой ветви, Ом (или nan).
+
+    dV_j/dV > 0 ⇔ dV/dI > R_s: R_s не может превышать дифференциальное
+    сопротивление диода. Берётся наклон dV/dI прямой по последним 20 % точек
+    прямой ветви (не меньше пяти) — там же, где ideality_from_data ищет перегиб.
+    Это проверка согласованности данных, а не формула модели."""
+    V = np.asarray(V, dtype=float)
+    I = np.asarray(I, dtype=float)
+    mask = np.isfinite(V) & np.isfinite(I) & (V > 0) & (I > 0)
+    V, I = V[mask], I[mask]
+    V, first = np.unique(V, return_index=True)
+    I = I[first]
+    tail = max(5, V.size // 5)
+    if V.size < 5 or np.ptp(I[-tail:]) <= 0:
+        return float("nan")
+    slope = np.polyfit(I[-tail:], V[-tail:], 1)[0]
+    return float(slope) if slope > 0 else float("nan")
+
+
 N_RISE_RUN = 3        # рост должен держаться ≥ 3 точек подряд (одиночный шум не закрывает окно)
 N_FIT_BOUNDS = (0.3, 20.0)
 

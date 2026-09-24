@@ -10,6 +10,7 @@
 """
 
 import json
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -64,30 +65,47 @@ NUMERIC_PARAMS = [
     # Эмпирическая модель (6.3) — базовый режим.
     ParamSpec("n_emp", "коэффициент идеальности n", "—", "n_emp"),
     ParamSpec("J0_emp", "плотность тока насыщения J₀", "А/см²", "J0_emp"),
-    # Экспериментальные данные о дефектах: хранятся в наборе, в модель не входят
-    # (плотность дислокаций в модели — N_dis, её задаёт EPD).
+    # Измерения и технология: хранятся в наборе, в расчёт не входят (кроме
+    # оценки N_D⁺ = Q/d_n автофитом). Пустое поле — «не измерено» (None).
     ParamSpec("afm_rms_nm", "шероховатость RMS (АСМ)", "нм", None),
     ParamSpec("afm_defects", "плотность дефектов (АСМ)", "см⁻²", None),
     ParamSpec("xrd_fwhm", "полуширина кривой качания (XRD)", "угл. с", None),
+    ParamSpec("hall_mu", "холловская подвижность i-слоя", "см²/(В·с)", None),
+    ParamSpec("implant_dose", "доза имплантации n⁺ Q", "см⁻²", None),
+    ParamSpec("implant_energy", "энергия имплантации", "кэВ", None),
+    ParamSpec("anneal_T", "температура отжига", "°C", None),
+    ParamSpec("growth_T", "температура подложки при росте", "°C", None),
 ]
+# Ключи, которые только хранятся в наборе (в physics.Structure не входят).
+# D_inner_um в расчёт тоже не входит, но нужен для схемы мезы — он обычный параметр.
+STORED_KEYS = frozenset(spec.key for spec in NUMERIC_PARAMS
+                        if spec.field is None and spec.key != "D_inner_um")
 CHOICE_FIELDS = ("bc_A_n", "bc_A_p", "bc_B_n", "bc_B_p")
 FLAG_FIELDS = ("sns_refinement", "edge_area")
 
-# Режимы окна: базовый — эмпирическая модель (6.3); расширенный — физическая
-# модель, свободна геометрия слоёв; «Подгонка» — физическая модель, свободны
-# все параметры. Значения при переключении сохраняются, меняется только то,
-# какие поля доступны для правки.
+# Режимы окна. Значения при переключении сохраняются, меняется только то,
+# какие поля доступны для правки:
+#   базовый — эмпирическая модель (6.3): минимум параметров, строится сразу;
+#   расширенный — физическая модель по всему, что экспериментатор измеряет
+#     (ВАХ, ВФХ, Холл, ρ, геометрия, технология, EPD, АСМ, XRD);
+#   «Подгонка» — плюс параметры формул, которые не измеряются (подвижности
+#     неосновных носителей, σ_R, времена жизни, n₂, нелинейная утечка).
+# n и J₀ формулы (6.3) есть только в базовом режиме: физическая модель их
+# не использует.
 MODE_BASIC, MODE_EXTENDED, MODE_FIT = "basic", "extended", "fit"
 MODES = (MODE_BASIC, MODE_EXTENDED, MODE_FIT)
 MODE_LABELS = {MODE_BASIC: "Базовая модель", MODE_EXTENDED: "Расширенная модель",
                MODE_FIT: "Подгонка"}
 MODE_MODEL = {MODE_BASIC: ph.MODEL_EMPIRICAL, MODE_EXTENDED: ph.MODEL_PHYSICAL,
               MODE_FIT: ph.MODEL_PHYSICAL}
-BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T",
-                        "n_emp", "J0_emp", "Rs", "Rsh"})
-GEOMETRY_KEYS = frozenset({"d_epi_um", "d_n_um", "d_sub_um"})
-MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: BASIC_KEYS | GEOMETRY_KEYS,
-             MODE_FIT: frozenset(spec.key for spec in NUMERIC_PARAMS)}
+EMPIRICAL_KEYS = frozenset({"n_emp", "J0_emp"})
+BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T", "Rs", "Rsh"}) | EMPIRICAL_KEYS
+MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub",
+                                                 "N_dis"} | STORED_KEYS
+FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
+                           "tau_n_bg", "tau_p_bg", "tau0_bg", "n2", "I_L", "m_leak"})
+MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: MEASURED_KEYS,
+             MODE_FIT: MEASURED_KEYS | FIT_ONLY_KEYS}
 
 
 def editable_keys(mode):
@@ -124,9 +142,14 @@ DEFAULT_PARAMS = {
     "m_leak": 3.0,
     "n_emp": 1.5,
     "J0_emp": 1e-6,
-    "afm_rms_nm": 0.0,
-    "afm_defects": 0.0,
-    "xrd_fwhm": 0.0,
+    "afm_rms_nm": None,
+    "afm_defects": None,
+    "xrd_fwhm": None,
+    "hall_mu": None,
+    "implant_dose": None,
+    "implant_energy": None,
+    "anneal_T": None,
+    "growth_T": None,
     "mode": MODE_BASIC,
     "bc_A_n": ph.SINK,
     "bc_A_p": ph.SINK,
@@ -137,6 +160,35 @@ DEFAULT_PARAMS = {
     "ideality_V1": None,
     "ideality_V2": None,
 }
+
+
+AUTO_DEFAULT = "значение по умолчанию"
+AUTO_FROM_IV = "из ВАХ (n_эксп, подгонка (6.3))"
+AUTO_FROM_DOSE = "оценка Q/d_n по дозе имплантации (полная активация)"
+
+
+def autofill(values, keys, ideality=None):
+    """«Автофит»: значения для пустых полей (None) из keys.
+
+    n и J₀ — из n_эксп и I₀/A по загруженной ВАХ (ideality —
+    physics.IdealityResult или None); N_D⁺ — оценка Q/d_n, если доза и d_n
+    заданы пользователем; остальное — DEFAULT_PARAMS. Поля, которые только
+    хранятся в наборе (STORED_KEYS), не заполняются: пустое — «не измерено».
+    Возвращает {ключ: (значение, источник)}."""
+    empty = [key for key in keys if values.get(key) is None and key not in STORED_KEYS]
+    filled = {}
+    D_um = values.get("D_um") if values.get("D_um") is not None else DEFAULT_PARAMS["D_um"]
+    area = math.pi * (D_um * UM) ** 2 / 4.0     # (1.1), как physics.Structure.area
+    for key in empty:
+        if key == "n_emp" and ideality is not None:
+            filled[key] = (float(f"{ideality.n:.3g}"), AUTO_FROM_IV)
+        elif key == "J0_emp" and ideality is not None:
+            filled[key] = (float(f"{ideality.I0 / area:.3g}"), AUTO_FROM_IV)
+        elif key == "ND_plus" and values.get("implant_dose") and values.get("d_n_um"):
+            filled[key] = (float(f"{values['implant_dose'] / (values['d_n_um'] * UM):.3g}"), AUTO_FROM_DOSE)
+        else:
+            filled[key] = (DEFAULT_PARAMS[key], AUTO_DEFAULT)
+    return filled
 
 
 @dataclass
@@ -168,7 +220,9 @@ def to_structure(params, scenario=None):
     """physics.Structure по параметрам набора; scenario — "A"/"B"
     (по умолчанию — из переключателя «тип i-слоя», для «оба» — B)."""
     merged = {**DEFAULT_PARAMS, **params}
-    kwargs = {spec.field: float(merged[spec.key]) * spec.scale
+    # Пустое поле (None), недоступное в текущем режиме, берётся по умолчанию.
+    kwargs = {spec.field: float(DEFAULT_PARAMS[spec.key] if merged[spec.key] is None
+                                else merged[spec.key]) * spec.scale
               for spec in NUMERIC_PARAMS if spec.field}
     kwargs.update({name: merged[name] for name in CHOICE_FIELDS})
     kwargs.update({name: bool(merged[name]) for name in FLAG_FIELDS})

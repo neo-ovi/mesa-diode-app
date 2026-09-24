@@ -35,7 +35,8 @@ def format_value(value):
 
 
 class Tooltip:
-    """Подсказка у виджета: появляется при наведении через delay мс."""
+    """Подсказка у виджета: появляется при наведении через delay мс.
+    text — строка или функция без аргументов (текст на момент показа)."""
 
     def __init__(self, widget, text, delay=500, wraplength=380):
         self.widget, self.text, self.delay, self.wraplength = widget, text, delay, wraplength
@@ -58,14 +59,15 @@ class Tooltip:
         import tkinter as tk
 
         self._after = None
-        if self._tip is not None or not self.text:
+        text = self.text() if callable(self.text) else self.text   # текст может меняться
+        if self._tip is not None or not text:
             return
         x = self.widget.winfo_rootx() + 12
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self._tip = tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(tip, text=self.text, justify="left", background="#ffffe8", relief="solid",
+        tk.Label(tip, text=text, justify="left", background="#ffffe8", relief="solid",
                  borderwidth=1, wraplength=self.wraplength, font=("Segoe UI", 9),
                  padx=6, pady=4).pack()
 

@@ -63,6 +63,8 @@ SHORT_LABELS = {
     "n2": "n₂ (ОПЗ)", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
     "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)",
     "afm_rms_nm": "RMS (АСМ)", "afm_defects": "дефекты (АСМ)", "xrd_fwhm": "FWHM (XRD)",
+    "hall_mu": "μ Холла (i-слой)", "implant_dose": "доза n⁺ Q", "implant_energy": "энергия ионов",
+    "anneal_T": "T отжига", "growth_T": "T роста",
 }
 # Подписи кривых для галочек: (график, ключ, подпись).
 CURVES = {
@@ -79,7 +81,9 @@ POSITIVE_KEYS = ("D_um", "d_epi_um", "h_um", "d_n_um", "d_sub_um", "ND_plus", "N
                  "rho_sub", "T", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
                  "tau0_bg", "n2", "Rsh", "m_leak", "D_inner_um", "n_emp", "J0_emp")
 NONNEGATIVE_KEYS = ("N_dis", "sigma_R_epi", "sigma_R_sub", "Rs", "I_L",
-                    "afm_rms_nm", "afm_defects", "xrd_fwhm")
+                    "afm_rms_nm", "afm_defects", "xrd_fwhm", "hall_mu", "implant_dose",
+                    "implant_energy")
+AUTO_COLOR = "#1a5fd0"   # поля, заполненные автофитом
 WHEEL_DELAY_MS = 400   # пересчёт после паузы в прокрутке колеса
 SPECS = {spec.key: spec for spec in presets.NUMERIC_PARAMS}
 # Подвижности, которые не входят в модель при данном сценарии (§5.3: «активны нужные»)
@@ -93,6 +97,8 @@ TAU0_V = -1.0   # напряжение оценки τ₀ по обратной 
 
 
 def _fmt(value):
+    if value is None:
+        return ""
     if isinstance(value, float) and math.isinf(value):
         return "inf"
     return f"{value:g}"
@@ -129,8 +135,11 @@ class MesaApp(tk.Tk):
         self.results = {}
         self.ideality = None
         self.ideality_notes = []     # причина неудачи n_эксп и замечания
+        self.ideality_short = ""     # коротко для строки статуса
+        self.ideality_message = ""   # причина, связь с R_s и что сделать
         self._take_from_iv = False   # подставить n и J₀ из новой ВАХ при пересчёте
         self._wheel_after = None
+        self.autofilled = {}         # ключ → источник значения, подставленного автофитом
         self.model_ideality = None
         self.comparison = None
         self.reference_data = None
@@ -159,6 +168,7 @@ class MesaApp(tk.Tk):
         sets_menu.add_command(label="Сохранить набор...", command=self.save_preset)
         sets_menu.add_command(label="Загрузить набор...", command=self.load_preset)
         sets_menu.add_command(label="Сбросить к опорному", command=self.reset_to_reference)
+        sets_menu.add_command(label="Новый образец (пустые поля)", command=self.new_sample)
         menubar.add_cascade(label="Наборы", menu=sets_menu)
 
         self.help_menu = tk.Menu(menubar, tearoff=0)
@@ -281,7 +291,8 @@ class MesaApp(tk.Tk):
                     "вычитаются шунт V/R_{sh} и диффузионный ток модели, остаток обращается по (5.4); "
                     "τ₀^{bg} — по (5.10). Нужны загруженная ВАХ и режим «Подгонка»."))
             if "N_dis" in keys:
-                ttk.Label(box, text="N_dis — по ямкам травления (EPD);\nостальное хранится в наборе",
+                ttk.Label(box, text="N_dis — по ямкам травления (EPD); остальное\nхранится в "
+                                    "наборе, пустое поле — «не измерено»",
                           foreground="#555555", font=FONT, justify="left").grid(
                     row=len(keys), column=0, columnspan=3, sticky="w", pady=(2, 0))
         self._build_extra_boxes(grid)
@@ -294,23 +305,50 @@ class MesaApp(tk.Tk):
                                      variable=self.mode, command=self._on_mode_change)
             button.pack(side=tk.LEFT, padx=(4, 0))
             Tooltip(button, hints.plain(hints.MODE_HINTS[mode]))
-        ttk.Button(buttons, text="Рассчитать", command=self.recompute).pack(side=tk.LEFT, padx=(16, 8))
-        self.status_lbl = ttk.Label(buttons, text="", font=("Segoe UI", 9, "bold"), wraplength=820)
-        self.status_lbl.pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Рассчитать", command=self.recompute).pack(side=tk.LEFT, padx=(16, 4))
+        self.autofit_button = ttk.Button(buttons, text="Автофит", command=self.autofit)
+        self.autofit_button.pack(side=tk.LEFT, padx=(0, 8))
+        Tooltip(self.autofit_button, hints.plain(hints.with_reference(hints.AUTOFIT_HINT, "autofit")))
+        # Строка статуса — отдельной строкой: рядом с кнопками ей не хватает ширины.
+        self.status_lbl = ttk.Label(outer, text="", font=("Segoe UI", 9, "bold"), wraplength=1250,
+                                    justify="left")
+        self.status_lbl.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
+        Tooltip(self.status_lbl, hints.plain(hints.with_reference(hints.STATUS_HINT, "vbi")),
+                wraplength=520)
+        ttk.Style(self).configure("Auto.TEntry", foreground=AUTO_COLOR)
 
     def _param_row(self, box, row, key):
         spec = SPECS[key]
-        hint = hints.plain(hints.PARAM_HINTS[key])
+        hint = hints.plain(hints.with_reference(hints.PARAM_HINTS[key], key))
         label = ttk.Label(box, text=SHORT_LABELS[key], font=FONT)
         label.grid(row=row, column=0, sticky="w")
         entry = ttk.Entry(box, textvariable=self.vars[key], width=9, justify="center")
         entry.grid(row=row, column=1, padx=3, pady=1)
         entry.bind("<Return>", lambda _e: self.recompute())
+        entry.bind("<KeyRelease>", lambda e, key=key: self._clear_autofilled(key)
+                   if e.keysym not in ("Return", "Tab", "ISO_Left_Tab") else None, add="+")
         bind_wheel(entry, lambda direction, fine, key=key: self._on_wheel(key, direction, fine))
         ttk.Label(box, text=spec.unit, font=FONT, foreground="#555555").grid(row=row, column=2, sticky="w")
+
+        def tooltip_text(key=key, head=f"{spec.label}.\n{hint}"):
+            source = self.autofilled.get(key)
+            return f"{head}\nПодставлено автофитом: {source}." if source else head
+
         for widget in (label, entry):
-            Tooltip(widget, f"{spec.label}.\n{hint}")
+            Tooltip(widget, tooltip_text)
         self.entries[key] = entry
+
+    def _clear_autofilled(self, key):
+        if self.autofilled.pop(key, None) is not None:
+            self.entries[key].configure(style="TEntry")
+
+    def _set_autofilled(self, filled):
+        for key in list(self.autofilled):
+            self._clear_autofilled(key)
+        for key, (value, source) in filled.items():
+            self.vars[key].set(format_value(value))
+            self.autofilled[key] = source
+            self.entries[key].configure(style="Auto.TEntry")
 
     def _on_wheel(self, key, direction, fine):
         """Колесо над полем: шаг — десятая часть старшего разряда (Ctrl — мельче);
@@ -323,6 +361,7 @@ class MesaApp(tk.Tk):
         except ValueError:
             return
         self.vars[key].set(format_value(wheel_step(value, direction, fine, key)))
+        self._clear_autofilled(key)
         if self._wheel_after is not None:
             self.after_cancel(self._wheel_after)
         self._wheel_after = self.after(WHEEL_DELAY_MS, self._wheel_recompute)
@@ -380,13 +419,14 @@ class MesaApp(tk.Tk):
         row += 1
         actions = ttk.Frame(box)
         actions.grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Button(actions, text="n (6.3) ← n_эксп", command=self._n_emp_from_experiment).pack(
-            side=tk.LEFT, padx=(0, 6))
+        self.n_emp_button = ttk.Button(actions, text="n (6.3) ← n_эксп", command=self._n_emp_from_experiment)
+        self.n_emp_button.pack(side=tk.LEFT, padx=(0, 6))
         self.n2_button = ttk.Button(actions, text="n₂ ← n_эксп", command=self._n2_from_experiment)
         self.n2_button.pack(side=tk.LEFT)
         row += 1
         self.ideality_lbl = ttk.Label(box, text="", foreground="#b35c00", font=FONT,
-                                      wraplength=420, justify="left")
+                                      wraplength=560, justify="left")
+        Tooltip(self.ideality_lbl, hints.plain(hints.reference("ideality")))
         self.ideality_lbl.grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     # ---------------------------------------------------- наборы образцов
@@ -394,7 +434,9 @@ class MesaApp(tk.Tk):
         self.preset = preset
         params = {**presets.DEFAULT_PARAMS, **preset.params}
         for key, var in self.vars.items():
-            var.set(_fmt(float(params[key])))
+            value = params[key]
+            var.set(_fmt(None if value is None else float(value)))
+        self._set_autofilled({})
         for key, var in self.bc_vars.items():
             var.set(ph.BOUNDARY_LABELS[params[key]])
         for key, var in self.flag_vars.items():
@@ -468,6 +510,38 @@ class MesaApp(tk.Tk):
         self._apply_preset(preset)
         self.recompute()
 
+    def new_sample(self):
+        """Новый образец: все числовые поля пустые, режим «Расширенная модель».
+        Введите измеренное, остальное заполнит «Автофит»."""
+        self._apply_preset(presets.Preset(name="новый образец",
+                                          params={**{key: None for key in SPECS},
+                                                  "mode": presets.MODE_EXTENDED}))
+        self.status_lbl.config(text="Новый образец: введите измеренные значения, затем «Автофит» "
+                                    "заполнит остальные.", foreground="#222222")
+
+    def autofit(self):
+        """Заполняет пустые поля текущего режима (см. presets.autofill)."""
+        values = {}
+        for key, var in self.vars.items():
+            try:
+                values[key] = float(var.get().strip().replace(",", "."))
+            except ValueError:
+                values[key] = None
+        ideality = self.ideality if self.exp_iv else None
+        if ideality is None and self.exp_iv:
+            first = self.exp_iv[0]
+            T = values["T"] if values["T"] else presets.DEFAULT_PARAMS["T"]
+            Rs = values["Rs"] if values["Rs"] is not None else presets.DEFAULT_PARAMS["Rs"]
+            ideality = ph.ideality_from_data(first["voltage"], first["value"], T, Rs)
+        # Заполняются все пустые поля модели, в том числе затемнённые в текущем
+        # режиме: так видно, с какими значениями идёт расчёт.
+        filled = presets.autofill(values, list(SPECS), ideality)
+        if not filled:
+            messagebox.showinfo("Автофит", "Пустых полей нет — заполнять нечего.")
+            return
+        self._set_autofilled(filled)
+        self.recompute()
+
     # -------------------------------------------------- сценарий, поля
     def _scenarios(self):
         i_type = self.i_type.get()
@@ -495,6 +569,8 @@ class MesaApp(tk.Tk):
             button.state(["!disabled"] if fit else ["disabled"])
         for button in (self.tau0_button, self.n2_button):
             button.state(["!disabled"] if fit else ["disabled"])
+        self.n_emp_button.state(["!disabled"] if mode == presets.MODE_BASIC else ["disabled"])
+        self.autofit_button.state(["!disabled"] if physical else ["disabled"])
         if recompute:
             self.recompute()
 
@@ -504,12 +580,25 @@ class MesaApp(tk.Tk):
     def _read_params(self):
         params = {"substrate": self.substrate.get(), "i_type": self.i_type.get(),
                   "mode": self.mode.get()}
+        editable = presets.editable_keys(self.mode.get())
+        missing = []
         for key, var in self.vars.items():
             raw = var.get().strip().replace(",", ".")
+            if not raw:
+                # Пустое поле: «не измерено» (хранимые поля) или ещё не задано.
+                params[key] = None
+                if key in editable and key not in presets.STORED_KEYS:
+                    missing.append(SPECS[key].label)
+                continue
             try:
                 params[key] = float(raw)
             except ValueError:
                 raise ValueError(f"«{SPECS[key].label}» задан некорректно: «{raw}»")
+        if missing:
+            hint = ("введите значения или нажмите «Автофит» — он подставит значения по умолчанию "
+                    "и оценки по данным." if self.mode.get() != presets.MODE_BASIC
+                    else "введите значения (или переключитесь в «Расширенную модель» и нажмите «Автофит»).")
+            raise ValueError("Не заданы: " + ", ".join(missing) + ".\n" + hint)
         for key, var in self.bc_vars.items():
             params[key] = BOUNDARY_BY_LABEL[var.get()]
         for key, var in self.flag_vars.items():
@@ -526,24 +615,28 @@ class MesaApp(tk.Tk):
                 raise ValueError("Окно идеальности: V₁ должно быть меньше V₂.")
 
         for key in POSITIVE_KEYS:
-            if params[key] <= 0:
+            if params[key] is not None and params[key] <= 0:
                 raise ValueError(f"«{SPECS[key].label}» должно быть больше нуля.")
         for key in NONNEGATIVE_KEYS:
-            if params[key] < 0:
+            if params[key] is not None and params[key] < 0:
                 raise ValueError(f"«{SPECS[key].label}» не может быть отрицательным.")
-        if params["d_n_um"] >= params["d_epi_um"]:
+        value = self._value_or_default
+        if value(params, "d_n_um") >= value(params, "d_epi_um"):
             raise ValueError("Толщина n⁺-слоя d_n должна быть меньше толщины эпитаксии d_epi.")
-        if params["D_inner_um"] >= params["D_um"]:
+        if value(params, "D_inner_um") >= value(params, "D_um"):
             raise ValueError("Внутренний диаметр кольца должен быть меньше диаметра мезы D.")
         return params
 
+    @staticmethod
+    def _value_or_default(params, key):
+        """Значение поля; для пустого (недоступного в режиме) — значение по умолчанию."""
+        return presets.DEFAULT_PARAMS[key] if params[key] is None else params[key]
+
     def _ideality_unavailable_text(self):
-        """Почему n_эксп нет: нет ВАХ или расчёт не удался (с причиной)."""
+        """Почему n_эксп нет: нет ВАХ или расчёт не удался (с причиной и решением)."""
         if not self.exp_iv:
             return "n_эксп ещё не определён: загрузите ВАХ."
-        reason = "; ".join(n.rstrip(".") for n in self.ideality_notes) or "причина не установлена"
-        return (f"n_эксп по ВАХ «{self.exp_iv[0]['label']}» не определён: {reason}.\n"
-                "Проверьте R_s и окно V₁ … V₂ (снимите «авто» и задайте окно вручную).")
+        return self.ideality_message or "n_эксп не определён: причина не установлена."
 
     def _copy_n_exp(self, key, title):
         if self.ideality is None:
@@ -630,7 +723,8 @@ class MesaApp(tk.Tk):
             messagebox.showerror("Ошибка ввода параметров", str(e))
             return
         self.preset.params = params
-        self.d_i_label.config(text=f"d_i = d_epi − d_n = {params['d_epi_um'] - params['d_n_um']:.3g} мкм (вычисляется)")
+        d_i = self._value_or_default(params, "d_epi_um") - self._value_or_default(params, "d_n_um")
+        self.d_i_label.config(text=f"d_i = d_epi − d_n = {d_i:.3g} мкм (вычисляется)")
 
         v_min, v_max = adaptive_voltage_range([d["voltage"] for d in self.exp_iv])
         V = np.linspace(v_min, v_max, adaptive_point_count(v_min, v_max))
@@ -676,28 +770,35 @@ class MesaApp(tk.Tk):
         """n_эксп по первой ВАХ (§6.3). После загрузки новой ВАХ n и J₀ модели
         (6.3) заменяются на n_эксп и I₀/A; дальше их можно менять вручную."""
         self.ideality, self.ideality_notes = None, []
+        self.ideality_short, self.ideality_message = "", ""
+        T, Rs = self._value_or_default(params, "T"), self._value_or_default(params, "Rs")
         if self.exp_iv:
             first = self.exp_iv[0]
-            self.ideality = ph.ideality_from_data(first["voltage"], first["value"], params["T"],
-                                                  params["Rs"], self._ideality_window(params),
+            self.ideality = ph.ideality_from_data(first["voltage"], first["value"], T, Rs,
+                                                  self._ideality_window(params),
                                                   diagnostics=self.ideality_notes)
+            rs_limit = ph.series_resistance_limit(first["voltage"], first["value"])
+            self.ideality_short, self.ideality_message = hints.ideality_failure_text(
+                first["label"], self.ideality_notes, Rs, rs_limit, self.ideality is not None)
         if self.ideality:
             self.n_exp_var.set(f"{self.ideality.n:.3f}")
             if self.window_auto.get():
                 self.V1_var.set(f"{self.ideality.V1:.3f}")
                 self.V2_var.set(f"{self.ideality.V2:.3f}")
-            text = "; ".join(self.ideality_notes)
         else:
             self.n_exp_var.set("—")
-            text = self._ideality_unavailable_text() if self.exp_iv else ""
-        self.ideality_lbl.config(text=text)
+        self.ideality_lbl.config(text=self.ideality_message)
         if self._take_from_iv and self.ideality:
             area = presets.to_structure(params).area
             params["n_emp"] = float(f"{self.ideality.n:.3g}")
             params["J0_emp"] = float(f"{self.ideality.I0 / area:.3g}")
             self.vars["n_emp"].set(format_value(params["n_emp"]))
             self.vars["J0_emp"].set(format_value(params["J0_emp"]))
-        self._take_from_iv = False
+            for key in ("n_emp", "J0_emp"):
+                self._clear_autofilled(key)
+            # Флаг снимается только после подстановки: если n_эксп пока не найден
+            # (например, R_s завышено), n и J₀ подставятся после исправления.
+            self._take_from_iv = False
 
     def _c2_window(self):
         try:
@@ -711,14 +812,19 @@ class MesaApp(tk.Tk):
         vbi = " / ".join(f"{s.Vbi:.3f} ({sc})" for sc, s in self.structures.items())
         parts = [f"V_bi = {vbi} В"]
         if n_exp:
-            parts.append(f"n_эксп = {n_exp:.3f}")
+            flag = f" ({self.ideality_short})" if self.ideality_short else ""
+            parts.append(f"n_эксп = {n_exp:.3f}{flag}")
+        elif self.exp_iv:
+            parts.append(f"n_эксп = — ({self.ideality_short or 'см. блок идеальности'})")
         else:
-            parts.append("n_эксп = — (не определён, см. блок идеальности)" if self.exp_iv
-                         else "n_эксп = — (нет ВАХ)")
+            parts.append("n_эксп = — (нет ВАХ)")
         parts.append(f"n_мод = {n_mod:.3f}" if n_mod else "n_мод = —")
         count = len(self.reference_data.warnings) if self.reference_data else 0
         if count:
-            parts.append(f"⚠ {count} предупреждений — см. Справочник")
+            word = ("предупреждение" if count % 10 == 1 and count % 100 != 11 else
+                    "предупреждения" if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14 else
+                    "предупреждений")
+            parts.append(f"⚠ {count} {word} — см. Справочник")
         self.status_lbl.config(text="   |   ".join(parts),
                                foreground="#b35c00" if count else "#222222")
 
@@ -923,10 +1029,11 @@ class MesaApp(tk.Tk):
     def _plot_mesa(self, params, s):
         self.ax_mesa.clear()
         self.mesa_canvas.draw_idle()
+        value = lambda key: self._value_or_default(params, key)  # noqa: E731
         diagram_params = type("DiagramParams", (), {
-            "D_um": params["D_um"], "d_um": params["D_inner_um"], "h_um": params["h_um"],
-            "ND_plus": params["ND_plus"], "N_i": params["N_i"], "N_sub": s.substrate[0],
-            "T": params["T"], "i_type": {"n": "i-слой n", "p": "i-слой p", "both": "тип i: оба"}[params["i_type"]],
+            "D_um": value("D_um"), "d_um": value("D_inner_um"), "h_um": value("h_um"),
+            "ND_plus": value("ND_plus"), "N_i": value("N_i"), "N_sub": s.substrate[0],
+            "T": value("T"), "i_type": {"n": "i-слой n", "p": "i-слой p", "both": "тип i: оба"}[params["i_type"]],
         })
         draw_mesa_diagram(self.ax_mesa, diagram_params)
         self.mesa_canvas.draw_idle()

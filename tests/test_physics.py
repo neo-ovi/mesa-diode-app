@@ -511,10 +511,41 @@ def test_modes_select_model_and_editable_fields():
     assert basic.model == ph.MODEL_EMPIRICAL
     for mode in (presets.MODE_EXTENDED, presets.MODE_FIT):
         assert presets.to_structure({"mode": mode}).model == ph.MODEL_PHYSICAL
-    assert presets.editable_keys(presets.MODE_BASIC) < presets.editable_keys(presets.MODE_EXTENDED)
-    assert presets.editable_keys(presets.MODE_EXTENDED) < presets.editable_keys(presets.MODE_FIT)
-    assert {"d_epi_um", "d_n_um", "d_sub_um"} <= presets.editable_keys(presets.MODE_EXTENDED)
-    assert presets.editable_keys(presets.MODE_FIT) == {s.key for s in presets.NUMERIC_PARAMS}
+    basic_keys = presets.editable_keys(presets.MODE_BASIC)
+    extended = presets.editable_keys(presets.MODE_EXTENDED)
+    fit = presets.editable_keys(presets.MODE_FIT)
+    # n и J₀ (6.3) — только базовый режим; расширенный — всё измеряемое; подгонка — плюс неизмеряемое
+    assert basic_keys - presets.EMPIRICAL_KEYS < extended < fit
+    assert not presets.EMPIRICAL_KEYS & (extended | fit)
+    assert {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub", "N_dis", "implant_dose"} <= extended
+    assert {"mu_n", "tau0_bg", "sigma_R_epi", "n2", "I_L"}.isdisjoint(extended)
+    assert fit | presets.EMPIRICAL_KEYS == {s.key for s in presets.NUMERIC_PARAMS}
+
+
+def test_empty_field_outside_mode_uses_default():
+    s = presets.to_structure({**presets.DEFAULT_PARAMS, "mu_n": None, "mode": presets.MODE_EXTENDED})
+    assert s.mu_n == presets.DEFAULT_PARAMS["mu_n"]
+
+
+def test_autofill_fills_only_empty_non_stored_fields():
+    values = {**presets.DEFAULT_PARAMS, "N_i": None, "Rs": None, "afm_rms_nm": None}
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_EXTENDED))
+    assert set(filled) == {"N_i", "Rs"}
+    assert filled["N_i"] == (presets.DEFAULT_PARAMS["N_i"], presets.AUTO_DEFAULT)
+
+
+def test_autofill_estimates_nd_plus_from_dose_and_takes_ideality():
+    values = {**presets.DEFAULT_PARAMS, "ND_plus": None, "implant_dose": 1e15, "d_n_um": 0.2,
+              "n_emp": None, "J0_emp": None}
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_EXTENDED))
+    assert filled["ND_plus"][0] == pytest.approx(1e15 / 0.2e-4)
+    assert filled["ND_plus"][1] == presets.AUTO_FROM_DOSE
+    ideality = ph.IdealityResult(n=1.42, dn=0.0, I0=2e-9, V1=0.1, V2=0.2,
+                                 V_local=np.array([]), n_local=np.array([]))
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_BASIC), ideality)
+    area = np.pi * (values["D_um"] * 1e-4) ** 2 / 4
+    assert filled["n_emp"] == (1.42, presets.AUTO_FROM_IV)
+    assert filled["J0_emp"][0] == pytest.approx(2e-9 / area, rel=1e-2)
 
 
 def test_preset_without_mode_opens_in_fit_mode(tmp_path):
@@ -523,3 +554,23 @@ def test_preset_without_mode_opens_in_fit_mode(tmp_path):
     preset = presets.load_preset(path)
     assert preset.params["mode"] == presets.MODE_FIT
     assert presets.to_structure(preset.params).model == ph.MODEL_PHYSICAL
+
+
+def test_series_resistance_limit_is_close_to_true_rs():
+    for rs in (30.0, 120.0):
+        s = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_FIT, "Rs": rs,
+                                  "tau0_bg": 3e-8})
+        V = np.linspace(-3, 1.5, 300)
+        limit = ph.series_resistance_limit(V, ph.solve_iv(s, V).I)
+        # dV/dI верха прямой ветви = R_s + nkT/(qI): чуть больше истинного R_s
+        assert rs < limit < 1.1 * rs
+
+
+def test_ideality_failure_text_links_rs_and_gives_solution():
+    from mesa_diode.simulator import hints
+    short, text = hints.ideality_failure_text("a.csv", ["x"], 3000.0, 123.0, found=False)
+    assert short == "R_s завышено"
+    assert "V_j = V − I·R_s" in text and "R_s < 123 Ом" in text and "3000" in text
+    short, text = hints.ideality_failure_text("a.csv", ["окно мало"], 10.0, 123.0, found=False)
+    assert "окно мало" in text and "V₁ … V₂" in text
+    assert hints.ideality_failure_text("a.csv", [], 10.0, 123.0, found=True) == ("", "")

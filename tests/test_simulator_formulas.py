@@ -148,3 +148,4 @@ def test_fit_guide_covers_modes_groups_boundaries_and_tables():
     assert fm.parameter_modes("D_um") == "Б, Р, П"
     assert fm.parameter_modes("d_epi_um") == "Р, П"
     assert fm.parameter_modes("mu_n") == "П"
+    assert fm.parameter_modes("n_emp") == "Б"

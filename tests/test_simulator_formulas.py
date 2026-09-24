@@ -134,3 +134,17 @@ def test_split_index_markup_sub_and_sup():
 def test_split_index_markup_keeps_plain_underscores():
     text = "physics.solve_iv и estimate_grading_m"
     assert fm.split_index_markup(text) == [(text, None)]
+
+
+def test_fit_guide_covers_modes_groups_boundaries_and_tables():
+    guide = dict(fm.fit_guide())
+    text = "\n".join(p for paragraphs in guide.values() for p in paragraphs)
+    for spec in presets.NUMERIC_PARAMS:
+        assert spec.label in text
+    for label in ph.BOUNDARY_LABELS.values():
+        assert label in text.lower()
+    assert "3900" in text and "1900" in text and "Ioffe" in text
+    assert "$" not in text and "\\" not in text
+    assert fm.parameter_modes("D_um") == "Б, Р, П"
+    assert fm.parameter_modes("d_epi_um") == "Р, П"
+    assert fm.parameter_modes("mu_n") == "П"

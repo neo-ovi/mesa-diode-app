@@ -48,16 +48,10 @@ COMPONENT_STYLE = {
 JS_COLOR = "#9b870c"
 FONT = ("Segoe UI", 9)
 
-# Группы полей: (заголовок, ключи, строка, столбец).
-GROUPS = [
-    ("Геометрия", ["D_um", "D_inner_um", "h_um", "d_epi_um", "d_n_um", "d_sub_um"], 0, 0),
-    ("Легирование и температура", ["ND_plus", "N_i", "rho_sub", "T"], 0, 1),
-    ("Материал и дефекты (таблицы, подбор)",
-     ["mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
-      "tau_n_bg", "tau_p_bg", "tau0_bg"], 0, 2),
-    ("Дефекты: измерения", ["N_dis", "afm_rms_nm", "afm_defects", "xrd_fwhm"], 0, 3),
-    ("Ток и утечки", ["n_emp", "J0_emp", "Rs", "Rsh", "n2", "I_L", "m_leak"], 1, 0),
-]
+# Группы полей: (заголовок, ключи, строка, столбец); состав — hints.FIELD_GROUPS.
+GROUP_POSITIONS = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
+GROUPS = [(title, keys, row, column) for (title, keys, _about), (row, column)
+          in zip(hints.FIELD_GROUPS, GROUP_POSITIONS)]
 # Короткие подписи в основном окне; полные — в таблице параметров окна формул.
 SHORT_LABELS = {
     "D_um": "D (мезы)", "D_inner_um": "d кольца (схема)", "d_epi_um": "d_epi",

@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Окно «Формулы и параметры» (ТЗ §6, §7): вкладки «Модель» и «Справочник».
+"""Окно «Формулы и параметры» (ТЗ §6, §7): вкладки «Параметры подгонки»,
+«Модель» и «Справочник».
+
+Вкладка «Параметры подгонки» — fit_guide(): режимы, группы полей (что это и
+на что влияет), граничные условия, табличные значения, измерения. Тексты —
+из simulator/hints.py (те же, что во всплывающих подсказках основного окна).
 
 Содержание вкладки «Модель» — реестр SECTIONS: разделы §0–§7, каждый —
 список блоков (текст, формула с источником или пометкой, плашка,
@@ -31,6 +36,7 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
+from mesa_diode.simulator import hints
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator import presets
 from mesa_diode.simulator.materials import GE, SIGMA_R, SIGMA_R_SOURCE
@@ -517,6 +523,59 @@ PARAMETER_USE = {
 }
 
 
+# ------------------------------------------------- «Параметры подгонки» --
+
+MODE_SHORT = {presets.MODE_BASIC: "Б", presets.MODE_EXTENDED: "Р", presets.MODE_FIT: "П"}
+SCENARIO_BOUNDARIES = (
+    "Сценарий A (i-слой p, переход n⁺/i): верхний контакт — для дырок в n⁺; граница "
+    "i/подложка — для электронов в i-слое. Сценарий B (i-слой n, переход i/подложка): "
+    "граница n/n⁺ — для дырок в i-слое (изотипный барьер, обычно «отражение»); тыльный "
+    "контакт — для электронов в подложке.")
+
+
+def parameter_modes(key):
+    """Буквы режимов, в которых параметр доступен: Б, Р, П."""
+    return ", ".join(MODE_SHORT[mode] for mode in presets.MODES if key in presets.editable_keys(mode))
+
+
+def table_values():
+    """Табличные значения, которые программа подставляет (строки текста)."""
+    rows = [
+        f"μ_{{n}} (электроны) = {GE.mu_n_max:g} см²/(В·с); μ_{{p}} (дырки) = {GE.mu_p_max:g} см²/(В·с) — "
+        f"Ge, 300 К, чистый материал (верхний предел решёточной подвижности) [{GE.source['mu']}]. "
+        "Программа берёт их как значения по умолчанию для всех слоёв; при сильном легировании "
+        "реальная подвижность ниже — её можно уменьшить в «Подгонке».",
+    ]
+    for name, value in SIGMA_R.items():
+        rows.append(f"σ_{{R}}: {name} — {value:g} см²/с")
+    rows.append(f"Источник σ_{{R}}: {SIGMA_R_SOURCE}. По умолчанию: i-слой и n⁺ — "
+                f"{presets.DEFAULT_PARAMS['sigma_R_epi']:g}, подложка — "
+                f"{presets.DEFAULT_PARAMS['sigma_R_sub']:g} см²/с.")
+    return rows
+
+
+def fit_guide():
+    """Содержание вкладки «Параметры подгонки»: [(заголовок, [абзацы])]."""
+    specs = {spec.key: spec for spec in presets.NUMERIC_PARAMS}
+    sections = [("Режимы окна", [
+        f"{hints.MODE_HINTS[mode]} [{MODE_SHORT[mode]}]" for mode in presets.MODES] + [
+        "Переключатель — внизу основного окна. Значения при переключении не теряются: "
+        "меняется только то, какие поля можно править. Колесо мыши над полем меняет значение "
+        "на десятую часть старшего разряда, с Ctrl — в 10 раз мельче."])]
+    for title, keys, about in hints.FIELD_GROUPS:
+        paragraphs = [about]
+        for key in keys:
+            spec = specs[key]
+            paragraphs.append(f"• {spec.label}, {spec.unit} [{parameter_modes(key)}] — {hints.PARAM_HINTS[key]}")
+        sections.append((title, paragraphs))
+    sections.append(("Граничные условия: сток, отражение, длинная база", [
+        text for text in hints.BOUNDARY_HINTS.values()] + [SCENARIO_BOUNDARIES, "Выбираются в расширенном режиме и в «Подгонке»; формулы — §4."]))
+    sections.append(("Табличные значения", table_values()))
+    sections.append(("Что измеряется и что рассчитывается",
+                     [f"• {what}: {result}" for what, result in hints.MEASUREMENTS]))
+    return sections
+
+
 def formula_ids():
     """Все ID формул во вкладке «Модель» (для проверки совпадения с docstring)."""
     ids = []
@@ -652,6 +711,7 @@ def _background_hex(widget):
 
 
 def _set_rich_text(widget, text):
+    widget = getattr(widget, "text", widget)
     widget.configure(state="normal")
     widget.delete("1.0", "end")
     for chunk, tag in split_index_markup(text):
@@ -661,31 +721,43 @@ def _set_rich_text(widget, text):
 
 def _rich_text(parent, text, bg, font=TEXT_FONT, foreground="#000000"):
     """Нередактируемый текст с переносом по ширине и настоящими индексами;
-    высота подстраивается под число строк после переноса."""
+    высота подстраивается под текст после переноса.
+
+    Возвращает рамку с атрибутами text (виджет Text) и fit_height(). Высоту
+    держит рамка, в пикселях: у самого Text высота задаётся в строках
+    шрифта, а строки с индексами и интервал spacing2 выше — последняя
+    строка обрезалась бы."""
     base = tkfont.Font(parent, font=font)
     small = tkfont.Font(parent, font=font)
     size = abs(base.actual("size"))
     small.configure(size=max(round(size * 0.75), 6))
-    # width=1: ширину задаёт pack(fill="x"), а не число символов по умолчанию.
     offset = max(size // 3, 2)
+    holder = tk.Frame(parent, background=bg, height=base.metrics("linespace") + 2 * offset,
+                      borderwidth=0, highlightthickness=0)
+    holder.pack_propagate(False)
+    # width=1: ширину задаёт pack(fill="x") рамки, а не число символов по умолчанию.
     # pady = сдвиг индекса: место под верхний/нижний индекс первой и последней строки.
-    widget = tk.Text(parent, wrap="word", width=1, height=1, borderwidth=0, highlightthickness=0,
+    widget = tk.Text(holder, wrap="word", width=1, height=1, borderwidth=0, highlightthickness=0,
                      padx=0, pady=offset, background=bg, foreground=foreground, font=base,
                      cursor="arrow", takefocus=0, spacing2=offset)
+    widget.pack(fill="both", expand=True)
     widget.tag_configure("sub", offset=-offset, font=small)
     widget.tag_configure("sup", offset=offset, font=small)
     _set_rich_text(widget, text)
-    widget._fonts = (base, small)
+    holder.text = widget
+    holder._fonts = (base, small)
+
     def _fit_height(_event=None):
-        # -update: Tk считает переносы строк лениво, без него число строк ещё неизвестно.
-        lines = int(widget.tk.call(widget._w, "count", "-update", "-displaylines", "1.0", "end"))
-        lines = max(lines, 1)
-        if int(widget.cget("height")) != lines:
-            widget.configure(height=lines)
+        # -update: Tk считает переносы строк лениво, без него высота ещё неизвестна;
+        # -ypixels до "end" — высота всех строк текста.
+        pixels = int(widget.tk.call(widget._w, "count", "-update", "-ypixels", "1.0", "end"))
+        height = max(pixels, base.metrics("linespace")) + 2 * offset
+        if int(holder.cget("height")) != height:
+            holder.configure(height=height)
 
     widget.bind("<Configure>", _fit_height)
-    widget.fit_height = _fit_height
-    return widget
+    holder.fit_height = _fit_height
+    return holder
 
 
 RENDER_DPI = 150
@@ -744,8 +816,10 @@ class FormulasWindow:
         self.bg = _background_hex(self.win)
         self.notebook = ttk.Notebook(self.win)
         self.notebook.pack(fill="both", expand=True)
+        self.guide_tab = _ScrollTab(self.notebook, "Параметры подгонки", self.bg)
         self.model_tab = _ScrollTab(self.notebook, "Модель", self.bg)
         self.reference_tab = _ScrollTab(self.notebook, "Справочник", self.bg)
+        self.tabs = (self.guide_tab, self.model_tab, self.reference_tab)
         self.current_widgets = []
         self.note_widgets = []
         self._build_model_tab()
@@ -756,10 +830,13 @@ class FormulasWindow:
         self.win.bind_all("<Button-5>", lambda _e: self._active().canvas.yview_scroll(3, "units"))
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         ttk.Button(self.win, text="Закрыть", command=self.close).pack(side="bottom", pady=6)
+        # Первая вкладка видна сразу: её текст строится, когда ширина окна уже
+        # известна, иначе абзацы при ширине в 1 символ дают гигантскую высоту.
+        self.win.update_idletasks()
+        self._build_guide_tab()
 
     def _active(self):
-        index = self.notebook.index(self.notebook.select())
-        return self.model_tab if index == 0 else self.reference_tab
+        return self.tabs[self.notebook.index(self.notebook.select())]
 
     def _on_wheel(self, event):
         self._active().canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -770,6 +847,20 @@ class FormulasWindow:
         self.win.destroy()
         if self.app is not None and getattr(self.app, "formulas_window", None) is self:
             self.app.formulas_window = None
+
+    # ------------------------------------------- вкладка «Параметры подгонки»
+    def _build_guide_tab(self):
+        body = self.guide_tab.body
+        _rich_text(body, "Б — базовая модель, Р — расширенная, П — подгонка: режимы, в которых "
+                         "параметр можно менять. Формулы — во вкладке «Модель».",
+                   self.bg, foreground="#555555").pack(fill="x", padx=self.PAD, pady=(self.PAD, 0))
+        for title, paragraphs in fit_guide():
+            frame = ttk.Frame(body)
+            frame.pack(fill="x", padx=self.PAD, pady=(self.PAD, 4))
+            _rich_text(frame, title, self.bg, font=TITLE_FONT).pack(fill="x")
+            ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=(2, 6))
+            for paragraph in paragraphs:
+                _rich_text(frame, paragraph, self.bg).pack(fill="x", pady=1)
 
     # ------------------------------------------------------ вкладка «Модель»
     def _build_model_tab(self):

@@ -173,7 +173,7 @@ AUTO_FROM_DOSE = "оценка Q/d_n по дозе имплантации (по�
 
 
 def autofill(values, keys, ideality=None):
-    """«Автофит»: значения для пустых полей (None) из keys.
+    """«Заполнить пустые»: значения для пустых полей (None) из keys.
 
     n и J₀ — из n_эксп и I₀/A по загруженной ВАХ (ideality —
     physics.IdealityResult или None); N_D⁺ — оценка Q/d_n, если доза и d_n

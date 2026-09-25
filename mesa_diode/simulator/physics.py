@@ -778,7 +778,7 @@ N_RISE_RUN = 3        # рост должен держаться ≥ 3 точе�
 N_FIT_BOUNDS = (0.3, 20.0)
 
 
-def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None, diagnostics=None):
+def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None, diagnostics=None, I_mod=float("inf")):
     """Коэффициент идеальности по прямой ветви (алгоритм §6.3).
 
     1) V > 0, I > 0; при R_s > 0 V заменяется на V − I·R_s;
@@ -811,7 +811,9 @@ def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None, diagnostics=None):
         return fail("в прямой ветви меньше трёх точек с V > 0 и I > 0")
 
     Vt = thermal_voltage(T)
-    Vj = V - I * Rs if Rs > 0 else V.copy()
+    # R_s(I) по (6.9); при I_mod = ∞ — постоянное R_s
+    Rs_I = Rs / (1.0 + np.abs(I) / I_mod) if np.isfinite(I_mod) else Rs
+    Vj = V - I * Rs_I if Rs > 0 else V.copy()
     if Rs > 0:
         # Перегиб: V − I·R_s устойчиво убывает на последних 20 % точек (наклон
         # прямой по ним < 0) — R_s завышено; шум отдельных точек так не срабатывает.
@@ -941,7 +943,7 @@ def scenario_summary(s, exp_iv=None, exp_cv=None, window=None):
     N_eff, отсечка 1/C², I(−1 В), n_мод, V_LI, δ_I, δ_C, изоляция (1.2)."""
     V_fwd = np.linspace(0.0, max(0.5, s.Vbi), 121)
     iv = solve_iv(s, V_fwd)
-    ideality = ideality_from_data(V_fwd, iv.I, s.T, s.Rs, window)
+    ideality = ideality_from_data(V_fwd, iv.I, s.T, s.Rs, window, I_mod=s.I_mod)
     return {
         "scenario": s.scenario,
         "Vbi": s.Vbi,

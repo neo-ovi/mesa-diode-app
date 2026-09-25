@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Основное окно симулятора мезадиода Ge (ТЗ §8).
+"""Основное окно симулятора мезадиода Ge (ТЗ §8; компоновка — версия 3.2).
 
-В окне — только варьируемые параметры модели (§5.3); всё справочное —
-во вкладке «Справочник» окна «Формулы и параметры». Физика — в
-simulator/physics.py, наборы образцов — simulator/presets.py.
+Компоновка по порядку работы: слева — шаги (1. режим, 2. образец,
+3. параметры — только используемые в режиме, 4. расчёт и подгонка);
+справа — графики и вкладки результатов (подгонка и отклонения модели от
+ВАХ, идеальность, предупреждения, схема мезы); внизу — строка статуса.
+Всё справочное — в окне «Формулы и параметры». Физика — simulator/physics.py,
+автоподгонка — simulator/fitting.py, наборы образцов — simulator/presets.py.
 
 Запуск:        python scripts/run_simulator.py
 Сборка в exe:  см. mesa_diode/simulator/README.md
 """
 
 import math
+import threading
 from pathlib import Path
 
 import tkinter as tk
@@ -21,6 +25,7 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from mesa_diode.simulator import fitting
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator import presets
 from mesa_diode.simulator import reference as ref
@@ -48,10 +53,10 @@ COMPONENT_STYLE = {
 JS_COLOR = "#9b870c"
 FONT = ("Segoe UI", 9)
 
-# Группы полей: (заголовок, ключи, строка, столбец); состав — hints.FIELD_GROUPS.
-GROUP_POSITIONS = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
-GROUPS = [(title, keys, row, column) for (title, keys, _about), (row, column)
-          in zip(hints.FIELD_GROUPS, GROUP_POSITIONS)]
+# Разделы боковой панели по порядку работы: (заголовок, ключи) — hints.FIELD_GROUPS.
+SIDEBAR_GROUPS = [(title, keys) for title, keys, _about in hints.FIELD_GROUPS]
+BOUNDARY_TITLE = "Граничные условия и опции"
+SIDEBAR_WIDTH = 400
 # Короткие подписи в основном окне; полные — в таблице параметров окна формул.
 SHORT_LABELS = {
     "D_um": "D (мезы)", "D_inner_um": "d кольца (схема)", "d_epi_um": "d_epi",
@@ -61,7 +66,7 @@ SHORT_LABELS = {
     "tau_n_bg": "τ_n^bg", "tau_p_bg": "τ_p^bg", "tau0_bg": "τ₀^bg (ОПЗ)",
     "N_dis": "N_dis", "sigma_R_epi": "σ_R (i, n⁺)", "sigma_R_sub": "σ_R (подложка)",
     "n2": "n₂ (ОПЗ)", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
-    "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)",
+    "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)", "I_mod": "I_mod (R_s(I))",
     "afm_rms_nm": "RMS (АСМ)", "afm_defects": "дефекты (АСМ)", "xrd_fwhm": "FWHM (XRD)",
     "hall_mu": "μ Холла (i-слой)", "implant_dose": "доза n⁺ Q", "implant_energy": "энергия ионов",
     "anneal_T": "T отжига", "growth_T": "T роста",
@@ -108,8 +113,8 @@ class MesaApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Симулятор мезадиода Ge — ВАХ, ВФХ, J–V")
-        self.geometry("1850x1150")
-        self.minsize(1500, 950)
+        self.geometry("1700x1020")
+        self.minsize(1250, 800)
 
         self.preset = presets.startup_preset()
         self.exp_iv = []   # {"label", "path", "voltage", "value"}
@@ -125,6 +130,7 @@ class MesaApp(tk.Tk):
         self.curve_vars = {(plot, key): tk.BooleanVar(value=True)
                            for plot, curves in CURVES.items() for key, _label in curves}
         self.window_auto = tk.BooleanVar(value=True)
+        self.show_all = tk.BooleanVar(value=False)
         self.n_exp_var = tk.StringVar()
         self.V1_var = tk.StringVar()
         self.V2_var = tk.StringVar()
@@ -144,33 +150,57 @@ class MesaApp(tk.Tk):
         self.comparison = None
         self.reference_data = None
         self.formulas_window = None
+        self.fit_result = None       # fitting.FitResult последней автоподгонки
+        self._fit_backup = None      # значения полей до подгонки (для «Вернуть»)
+        self._fit_thread = None
+        self._fit_progress = ""
+        self.deviation = None        # (V, отклонение модели от эксперимента, δ)
 
-        self._build_menu()
-        self._build_figure_area()
-        self._build_panel()
-        self._build_curve_bar()
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
+        self._build_layout()
         self._apply_preset(self.preset)
         self.after(100, self.recompute)
 
-    # ------------------------------------------------------------ меню
+    # ------------------------------------------------------ компоновка окна
+    def _build_layout(self):
+        """Окно: панель инструментов; слева — шаги работы (режим, образец,
+        поля, действия); справа — графики и вкладки результатов; внизу — статус."""
+        self._build_menu()
+        self._build_toolbar()
+        self.status_lbl = ttk.Label(self, text="", font=("Segoe UI", 9, "bold"), anchor="w",
+                                    padding=(8, 3), relief="sunken")
+        self.status_lbl.pack(side=tk.BOTTOM, fill=tk.X)
+        Tooltip(self.status_lbl, hints.plain(hints.with_reference(hints.STATUS_HINT, "vbi")),
+                wraplength=520)
+        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(4, 4))
+        sidebar = ttk.Frame(paned)
+        right = ttk.PanedWindow(paned, orient=tk.VERTICAL)
+        paned.add(sidebar, weight=0)
+        paned.add(right, weight=1)
+        self._build_sidebar(sidebar)
+        plots = ttk.Frame(right)
+        results = ttk.Frame(right)
+        right.add(plots, weight=3)
+        right.add(results, weight=2)
+        self._build_figure_area(plots)
+        self._build_results(results)
+        ttk.Style(self).configure("Auto.TEntry", foreground=AUTO_COLOR)
+        ttk.Style(self).configure("Section.TButton", anchor="w", font=("Segoe UI", 9, "bold"))
+
     def _build_menu(self):
         menubar = tk.Menu(self)
-
         data_menu = tk.Menu(menubar, tearoff=0)
         data_menu.add_command(label="Загрузить эксперим. ВАХ (файл)...", command=self.load_experimental_iv)
         data_menu.add_command(label="Загрузить эксперим. ВФХ (файл)...", command=self.load_experimental_cv)
         data_menu.add_separator()
         data_menu.add_command(label="Очистить экспериментальные данные", command=self.clear_experimental)
         menubar.add_cascade(label="Данные", menu=data_menu)
-
         sets_menu = tk.Menu(menubar, tearoff=0)
         sets_menu.add_command(label="Сохранить набор...", command=self.save_preset)
         sets_menu.add_command(label="Загрузить набор...", command=self.load_preset)
         sets_menu.add_command(label="Сбросить к опорному", command=self.reset_to_reference)
         sets_menu.add_command(label="Новый образец (пустые поля)", command=self.new_sample)
         menubar.add_cascade(label="Наборы", menu=sets_menu)
-
         self.help_menu = tk.Menu(menubar, tearoff=0)
         self.help_menu.add_command(label="Формулы и параметры", command=self.open_formulas_window)
         self.help_menu.add_separator()
@@ -181,162 +211,175 @@ class MesaApp(tk.Tk):
         menubar.add_cascade(label="Справка", menu=self.help_menu)
         self.config(menu=menubar)
 
-        quick = ttk.Frame(self)
-        quick.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
-        for text, command in (("Загрузить ВАХ", self.load_experimental_iv),
-                              ("Загрузить ВФХ", self.load_experimental_cv),
-                              ("Очистить данные", self.clear_experimental),
-                              ("Сохранить набор", self.save_preset),
-                              ("Загрузить набор", self.load_preset),
-                              ("Сбросить к опорному", self.reset_to_reference),
-                              ("Формулы и параметры", self.open_formulas_window)):
-            ttk.Button(quick, text=text, command=command).pack(side=tk.LEFT, padx=(0, 6))
-        self.preset_label = ttk.Label(quick, text="", foreground="#555555")
-        self.preset_label.pack(side=tk.LEFT, padx=(12, 0))
+    def _build_toolbar(self):
+        bar = ttk.Frame(self, padding=(6, 6, 6, 0))
+        bar.pack(side=tk.TOP, fill=tk.X)
+        groups = (
+            (("Загрузить ВАХ", self.load_experimental_iv, "Файл: два столбца V, I (вольты, амперы)."),
+             ("Загрузить ВФХ", self.load_experimental_cv, "Файл: два столбца V, C (вольты, фарады)."),
+             ("Очистить данные", self.clear_experimental, "Убрать загруженные ВАХ и ВФХ.")),
+            (("Сохранить набор", self.save_preset, "Все поля, файлы измерений и метаданные — в JSON."),
+             ("Загрузить набор", self.load_preset, "Открыть сохранённый набор образца."),
+             ("Опорный", self.reset_to_reference, "Опорный набор из каталога данных."),
+             ("Новый образец", self.new_sample, "Все поля пустые, режим «Расширенная модель».")),
+            (("Формулы и параметры", self.open_formulas_window, "Что означает каждый параметр, формулы "
+              "модели и справочные величины."),
+             ("Методичка", lambda: help_module.open_metodichka(self, "pdf"), "Открыть методичку (PDF).")),
+        )
+        for index, group in enumerate(groups):
+            if index:
+                ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+            for text, command, tip in group:
+                button = ttk.Button(bar, text=text, command=command)
+                button.pack(side=tk.LEFT, padx=(0, 4))
+                Tooltip(button, tip)
+        self.preset_label = ttk.Label(bar, text="", foreground="#555555")
+        self.preset_label.pack(side=tk.LEFT, padx=(14, 0))
 
-    # --------------------------------------------------------- графики
-    def _build_figure_area(self):
-        self.fig = Figure(figsize=(16, 4.1), dpi=100)
-        gs = self.fig.add_gridspec(1, 3, wspace=0.42)
-        self.fig.subplots_adjust(left=0.05, right=0.96, bottom=0.13, top=0.91)
-        self.ax_iv = self.fig.add_subplot(gs[0, 0])
-        self.ax_cv = self.fig.add_subplot(gs[0, 1])
-        self.ax_jv = self.fig.add_subplot(gs[0, 2])
-        self.ax_jv_n = self.ax_jv.twinx()
+    # ----------------------------------------------------- боковая панель
+    def _build_sidebar(self, parent):
+        canvas = tk.Canvas(parent, width=SIDEBAR_WIDTH, highlightthickness=0,
+                           background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
+        scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        body = ttk.Frame(canvas, padding=(4, 2, 8, 8))
+        window = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+        self.sidebar_canvas = canvas
 
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
-        ttk.Label(bar, text="График 2:", font=FONT).pack(side=tk.LEFT)
-        for value, text in (("C", "ВФХ"), ("invC2", "1/C²")):
-            ttk.Radiobutton(bar, text=text, value=value, variable=self.cv_view,
-                            command=self.recompute).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(bar, text="  участок прямой 1/C²: от", font=FONT).pack(side=tk.LEFT)
-        for var in (self.c2_from_var, self.c2_to_var):
-            e = ttk.Entry(bar, textvariable=var, width=6, justify="center")
-            e.pack(side=tk.LEFT, padx=2)
-            e.bind("<Return>", lambda _e: self.recompute())
-        ttk.Label(bar, text="В", font=FONT).pack(side=tk.LEFT)
+        # Шаг 1. Режим
+        step = self._step(body, "1. Режим модели")
+        for mode in presets.MODES:
+            button = ttk.Radiobutton(step, text=presets.MODE_LABELS[mode], value=mode,
+                                     variable=self.mode, command=self._on_mode_change)
+            button.pack(anchor="w")
+            Tooltip(button, hints.plain(hints.with_reference(hints.MODE_HINTS[mode], "modes")))
+        self.mode_lbl = ttk.Label(step, text="", foreground="#555555", font=FONT,
+                                  wraplength=SIDEBAR_WIDTH - 40, justify="left")
+        self.mode_lbl.pack(anchor="w", fill=tk.X, pady=(2, 0))
 
-        # Холст упаковывается после панели (см. __init__): иначе он, растягиваясь,
-        # забирает высоту первым и панель с кнопкой «Рассчитать» обрезается.
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-
-    def _build_curve_bar(self):
-        """Галочки кривых под каждым графиком; подсказка — что это за кривая."""
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(2, 0))
-        self.curve_buttons = {}
-        per_row = 4
-        for column, plot in enumerate(("iv", "cv", "jv")):
-            bar.columnconfigure(column, weight=1, uniform="curves")
-            frame = ttk.Frame(bar)
-            frame.grid(row=0, column=column, sticky="nw", padx=(40, 0))
-            for index, (key, label) in enumerate(CURVES[plot]):
-                button = ttk.Checkbutton(frame, text=label, variable=self.curve_vars[(plot, key)],
-                                         command=self._redraw)
-                button.grid(row=index // per_row, column=index % per_row, sticky="w", padx=(0, 6))
-                Tooltip(button, hints.plain(hints.CURVE_HINTS[key]))
-                self.curve_buttons[(plot, key)] = button
-
-    def _shown(self, plot, key):
-        return self.curve_vars[(plot, key)].get()
-
-    # ---------------------------------------------------------- панель
-    def _build_panel(self):
-        bottom = ttk.Frame(self)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=6)
-
-        # Схема мезы — отдельный холст справа: текст на ней фиксированного
-        # размера в пунктах, поэтому ей нужна своя, не сжимаемая площадь
-        # (упаковывается первой, чтобы панель её не вытесняла).
-        self.mesa_fig = Figure(figsize=(5.0, 3.9), dpi=100)
-        self.mesa_fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.93)
-        self.ax_mesa = self.mesa_fig.add_subplot(111)
-        self.mesa_canvas = FigureCanvasTkAgg(self.mesa_fig, master=bottom)
-        self.mesa_canvas.get_tk_widget().pack(side=tk.RIGHT, padx=(8, 0))
-        outer = ttk.Frame(bottom)
-        outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        top = ttk.Frame(outer)
-        top.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(top, text="Подложка:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
-        ttk.Radiobutton(top, text="Ge", value="Ge", variable=self.substrate).pack(side=tk.LEFT)
-        ttk.Radiobutton(top, text="Si", value="Si", variable=self.substrate,
-                        state="disabled").pack(side=tk.LEFT)
-        ttk.Label(top, text="(Si — бэклог Б-1: нужно сродство к электрону)",
-                  foreground="#777777", font=FONT).pack(side=tk.LEFT, padx=(2, 18))
-        ttk.Label(top, text="Тип i-слоя (знак Холла):", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
-        for value, text in ((presets.I_TYPE_N, "n (R_H < 0)"), (presets.I_TYPE_P, "p (R_H > 0)"),
-                            (presets.I_TYPE_BOTH, "оба")):
-            ttk.Radiobutton(top, text=text, value=value, variable=self.i_type,
+        # Шаг 2. Образец
+        step = self._step(body, "2. Образец")
+        row = ttk.Frame(step)
+        row.pack(anchor="w", fill=tk.X)
+        ttk.Label(row, text="Подложка:", font=FONT).pack(side=tk.LEFT)
+        ttk.Radiobutton(row, text="Ge", value="Ge", variable=self.substrate).pack(side=tk.LEFT)
+        si = ttk.Radiobutton(row, text="Si", value="Si", variable=self.substrate, state="disabled")
+        si.pack(side=tk.LEFT)
+        Tooltip(si, "Подложка Si — в разработке (бэклог Б-1): нужно сродство к электрону.")
+        row = ttk.Frame(step)
+        row.pack(anchor="w", fill=tk.X, pady=(2, 0))
+        label = ttk.Label(row, text="Тип i-слоя:", font=FONT)
+        label.pack(side=tk.LEFT)
+        Tooltip(label, "Знак эффекта Холла i-слоя. n — переход i/подложка (сценарий B), p — переход n⁺/i "
+                       "(сценарий A), «оба» — сравнение сценариев (п. 10.4 методички).")
+        for value, text in ((presets.I_TYPE_N, "n"), (presets.I_TYPE_P, "p"), (presets.I_TYPE_BOTH, "оба")):
+            ttk.Radiobutton(row, text=text, value=value, variable=self.i_type,
                             command=self._on_scenario_change).pack(side=tk.LEFT, padx=(4, 0))
 
-        grid = ttk.Frame(outer)
-        grid.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-        self.entries = {}
-        for title, keys, grid_row, grid_col in GROUPS:
-            box = ttk.LabelFrame(grid, text=title, padding=(6, 2))
-            box.grid(row=grid_row, column=grid_col, sticky="nsew", padx=(0, 6), pady=(0, 4))
-            for row, key in enumerate(keys):
-                self._param_row(box, row, key)
+        # Шаг 3. Параметры
+        step = self._step(body, "3. Параметры")
+        show_all = ttk.Checkbutton(step, text="показать все поля", variable=self.show_all,
+                                   command=self._refresh_fields)
+        show_all.pack(anchor="w")
+        Tooltip(show_all, "Показать и поля, не используемые в текущем режиме (они серые). "
+                          "Их значения сохраняются в наборе.")
+        self.entries, self.field_rows, self.sections = {}, {}, {}
+        for title, keys in SIDEBAR_GROUPS:
+            section = self._section(step, title)
+            for row_index, key in enumerate(keys):
+                self._param_row(section.body, row_index, key)
+            extra = len(keys)
             if "d_sub_um" in keys:
-                self.d_i_label = ttk.Label(box, text="", foreground="#555555", font=FONT)
-                self.d_i_label.grid(row=len(keys), column=0, columnspan=3, sticky="w")
+                self.d_i_label = ttk.Label(section.body, text="", foreground="#555555", font=FONT)
+                self.d_i_label.grid(row=extra, column=0, columnspan=3, sticky="w")
             if "tau0_bg" in keys:
-                self.tau0_button = ttk.Button(box, text="Оценить τ₀ по обратной ветви",
+                self.tau0_button = ttk.Button(section.body, text="Оценить τ₀ по обратной ветви",
                                               command=self._estimate_tau0)
-                self.tau0_button.grid(row=len(keys), column=0, columnspan=3, sticky="w", pady=(2, 0))
+                self.tau0_button.grid(row=extra, column=0, columnspan=3, sticky="w", pady=(2, 0))
                 Tooltip(self.tau0_button, hints.plain(
                     f"τ₀ из тока обратной ветви при V = {TAU0_V:g} В: из измеренного тока "
                     "вычитаются шунт V/R_{sh} и диффузионный ток модели, остаток обращается по (5.4); "
-                    "τ₀^{bg} — по (5.10). Нужны загруженная ВАХ и режим «Подгонка»."))
-            if "N_dis" in keys:
-                ttk.Label(box, text="N_dis — по ямкам травления (EPD); остальное\nхранится в "
-                                    "наборе, пустое поле — «не измерено»",
-                          foreground="#555555", font=FONT, justify="left").grid(
-                    row=len(keys), column=0, columnspan=3, sticky="w", pady=(2, 0))
-        self._build_extra_boxes(grid)
+                    "τ₀^{bg} — по (5.10). Нужна загруженная ВАХ."))
+            self.sections[title] = (section, keys)
+        section = self._section(step, BOUNDARY_TITLE)
+        self._build_boundary_box(section.body)
+        self.sections[BOUNDARY_TITLE] = (section, [])
 
-        buttons = ttk.Frame(outer)
-        buttons.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-        ttk.Label(buttons, text="Режим:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
-        for mode in presets.MODES:
-            button = ttk.Radiobutton(buttons, text=presets.MODE_LABELS[mode], value=mode,
-                                     variable=self.mode, command=self._on_mode_change)
-            button.pack(side=tk.LEFT, padx=(4, 0))
-            Tooltip(button, hints.plain(hints.MODE_HINTS[mode]))
-        ttk.Button(buttons, text="Рассчитать", command=self.recompute).pack(side=tk.LEFT, padx=(16, 4))
-        self.autofit_button = ttk.Button(buttons, text="Автофит", command=self.autofit)
-        self.autofit_button.pack(side=tk.LEFT, padx=(0, 8))
+        # Шаг 4. Действия
+        step = self._step(body, "4. Расчёт и подгонка")
+        row = ttk.Frame(step)
+        row.pack(anchor="w", fill=tk.X)
+        ttk.Button(row, text="Рассчитать", command=self.recompute).pack(side=tk.LEFT, padx=(0, 4))
+        self.fit_button = ttk.Button(row, text="Подогнать к ВАХ", command=self.start_fit)
+        self.fit_button.pack(side=tk.LEFT, padx=(0, 4))
+        Tooltip(self.fit_button, hints.plain(hints.with_reference(hints.FIT_HINT, "fit")))
+        row = ttk.Frame(step)
+        row.pack(anchor="w", fill=tk.X, pady=(3, 0))
+        self.autofit_button = ttk.Button(row, text="Заполнить пустые поля", command=self.autofit)
+        self.autofit_button.pack(side=tk.LEFT)
         Tooltip(self.autofit_button, hints.plain(hints.with_reference(hints.AUTOFIT_HINT, "autofit")))
-        # Строка статуса — отдельной строкой: рядом с кнопками ей не хватает ширины.
-        self.status_lbl = ttk.Label(outer, text="", font=("Segoe UI", 9, "bold"), wraplength=1250,
-                                    justify="left")
-        self.status_lbl.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
-        Tooltip(self.status_lbl, hints.plain(hints.with_reference(hints.STATUS_HINT, "vbi")),
-                wraplength=520)
-        ttk.Style(self).configure("Auto.TEntry", foreground=AUTO_COLOR)
+        self._bind_sidebar_scroll(body)
+
+    def _step(self, parent, title):
+        frame = ttk.LabelFrame(parent, text=title, padding=(6, 2, 6, 4))
+        frame.pack(fill=tk.X, pady=(0, 6))
+        return frame
+
+    def _section(self, parent, title):
+        """Сворачиваемый раздел: заголовок-кнопка и тело с полями."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill=tk.X, pady=(3, 0))
+        state = {"open": True}
+        header = ttk.Button(outer, text=f"▾ {title}", style="Section.TButton")
+        header.pack(fill=tk.X)
+        body = ttk.Frame(outer, padding=(6, 2, 0, 2))
+        body.pack(fill=tk.X)
+
+        def toggle():
+            state["open"] = not state["open"]
+            header.configure(text=f"{'▾' if state['open'] else '▸'} {title}")
+            if state["open"]:
+                body.pack(fill=tk.X)
+            else:
+                body.pack_forget()
+
+        header.configure(command=toggle)
+        outer.body, outer.header = body, header
+        return outer
+
+    def _bind_sidebar_scroll(self, widget):
+        """Колесо над панелью прокручивает её; над полем ввода — меняет значение."""
+        if not isinstance(widget, (ttk.Entry, ttk.Combobox)):
+            bind_wheel(widget, lambda direction, _fine: self.sidebar_canvas.yview_scroll(-direction, "units"))
+        for child in widget.winfo_children():
+            self._bind_sidebar_scroll(child)
 
     def _param_row(self, box, row, key):
         spec = SPECS[key]
         hint = hints.plain(hints.with_reference(hints.PARAM_HINTS[key], key))
-        label = ttk.Label(box, text=SHORT_LABELS[key], font=FONT)
+        label = ttk.Label(box, text=SHORT_LABELS[key], font=FONT, width=16)
         label.grid(row=row, column=0, sticky="w")
-        entry = ttk.Entry(box, textvariable=self.vars[key], width=9, justify="center")
+        entry = ttk.Entry(box, textvariable=self.vars[key], width=11, justify="center")
         entry.grid(row=row, column=1, padx=3, pady=1)
         entry.bind("<Return>", lambda _e: self.recompute())
         entry.bind("<KeyRelease>", lambda e, key=key: self._clear_autofilled(key)
                    if e.keysym not in ("Return", "Tab", "ISO_Left_Tab") else None, add="+")
         bind_wheel(entry, lambda direction, fine, key=key: self._on_wheel(key, direction, fine))
-        ttk.Label(box, text=spec.unit, font=FONT, foreground="#555555").grid(row=row, column=2, sticky="w")
+        unit = ttk.Label(box, text=spec.unit, font=FONT, foreground="#555555")
+        unit.grid(row=row, column=2, sticky="w")
 
         def tooltip_text(key=key, head=f"{spec.label}.\n{hint}"):
             source = self.autofilled.get(key)
-            return f"{head}\nПодставлено автофитом: {source}." if source else head
+            return f"{head}\nПодставлено: {source}." if source else head
 
         for widget in (label, entry):
             Tooltip(widget, tooltip_text)
         self.entries[key] = entry
+        self.field_rows[key] = (label, entry, unit)
 
     def _clear_autofilled(self, key):
         if self.autofilled.pop(key, None) is not None:
@@ -370,41 +413,133 @@ class MesaApp(tk.Tk):
         self._wheel_after = None
         self.recompute()
 
-    def _build_extra_boxes(self, grid):
-        box = ttk.LabelFrame(grid, text="Граничные условия и опции", padding=(6, 2))
-        box.grid(row=1, column=1, sticky="nsew", padx=(0, 6), pady=(0, 4))
+    def _build_boundary_box(self, box):
         self.bc_widgets = {}
         bc_hint = "\n".join(f"{ph.BOUNDARY_LABELS[key]} — {hints.plain(text)}"
                             for key, text in hints.BOUNDARY_HINTS.items())
         row = 0
         for scenario in (ph.SCENARIO_A, ph.SCENARIO_B):
             for key, label in BOUNDARY_FIELDS[scenario]:
-                lbl = ttk.Label(box, text=label, font=FONT)
+                lbl = ttk.Label(box, text=label, font=FONT, width=20)
                 combo = ttk.Combobox(box, textvariable=self.bc_vars[key], width=13, state="readonly",
                                      values=list(ph.BOUNDARY_LABELS.values()))
                 combo.bind("<<ComboboxSelected>>", lambda _e: self.recompute())
                 lbl.grid(row=row, column=0, sticky="w")
-                combo.grid(row=row, column=1, columnspan=2, sticky="w", padx=3)
+                combo.grid(row=row, column=1, sticky="w", padx=3)
                 for widget in (lbl, combo):
-                    Tooltip(widget, bc_hint, wraplength=520)
+                    Tooltip(widget, bc_hint + "\n" + hints.plain(hints.reference("boundary")), wraplength=520)
                 self.bc_widgets[key] = (lbl, combo)
                 row += 1
         self.flag_buttons = {}
         for key, text in (("sns_refinement", "уточнение SNS (5.5)"),
                           ("edge_area", "краевая добавка площади ОПЗ (1.3)")):
             button = ttk.Checkbutton(box, text=text, variable=self.flag_vars[key], command=self.recompute)
-            button.grid(row=row, column=0, columnspan=3, sticky="w")
+            button.grid(row=row, column=0, columnspan=2, sticky="w")
             self.flag_buttons[key] = button
             row += 1
 
-        box = ttk.LabelFrame(grid, text="Коэффициент идеальности (§6.3)", padding=(6, 2))
-        box.grid(row=1, column=2, columnspan=2, sticky="nsew", padx=(0, 6), pady=(0, 4))
+    # ------------------------------------------------------------ графики
+    def _build_figure_area(self, parent):
+        bar = ttk.Frame(parent)
+        bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
+        ttk.Label(bar, text="График 2:", font=FONT).pack(side=tk.LEFT)
+        for value, text in (("C", "ВФХ"), ("invC2", "1/C²")):
+            ttk.Radiobutton(bar, text=text, value=value, variable=self.cv_view,
+                            command=self.recompute).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(bar, text="   участок прямой 1/C²: от", font=FONT).pack(side=tk.LEFT)
+        for var in (self.c2_from_var, self.c2_to_var):
+            e = ttk.Entry(bar, textvariable=var, width=6, justify="center")
+            e.pack(side=tk.LEFT, padx=2)
+            e.bind("<Return>", lambda _e: self.recompute())
+        ttk.Label(bar, text="В", font=FONT).pack(side=tk.LEFT)
+
+        self.fig = Figure(figsize=(12, 3.6), dpi=100)
+        gs = self.fig.add_gridspec(1, 3, wspace=0.40)
+        self.fig.subplots_adjust(left=0.06, right=0.95, bottom=0.15, top=0.90)
+        self.ax_iv = self.fig.add_subplot(gs[0, 0])
+        self.ax_cv = self.fig.add_subplot(gs[0, 1])
+        self.ax_jv = self.fig.add_subplot(gs[0, 2])
+        self.ax_jv_n = self.ax_jv.twinx()
+        self._build_curve_bar(parent)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    def _build_curve_bar(self, parent):
+        """Галочки кривых под каждым графиком; подсказка — что это за кривая."""
+        bar = ttk.Frame(parent)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+        self.curve_buttons = {}
+        per_row = 4
+        for column, plot in enumerate(("iv", "cv", "jv")):
+            bar.columnconfigure(column, weight=1, uniform="curves")
+            frame = ttk.Frame(bar)
+            frame.grid(row=0, column=column, sticky="nw", padx=(30, 0))
+            for index, (key, label) in enumerate(CURVES[plot]):
+                button = ttk.Checkbutton(frame, text=label, variable=self.curve_vars[(plot, key)],
+                                         command=self._redraw)
+                button.grid(row=index // per_row, column=index % per_row, sticky="w", padx=(0, 6))
+                Tooltip(button, hints.plain(hints.with_reference(hints.CURVE_HINTS[key], "curves")))
+                self.curve_buttons[(plot, key)] = button
+
+    def _shown(self, plot, key):
+        return self.curve_vars[(plot, key)].get()
+
+    # --------------------------------------------------- вкладки результатов
+    def _build_results(self, parent):
+        self.results_tabs = ttk.Notebook(parent)
+        self.results_tabs.pack(fill=tk.BOTH, expand=True)
+        self._build_fit_tab()
+        self._build_ideality_tab()
+        self._build_warnings_tab()
+        self._build_mesa_tab()
+
+    def _build_fit_tab(self):
+        tab = ttk.Frame(self.results_tabs, padding=4)
+        self.results_tabs.add(tab, text="Подгонка и отклонения")
+        left = ttk.Frame(tab)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        columns = ("value", "error", "unit")
+        self.fit_table = ttk.Treeview(left, columns=columns, height=8, selectmode="none")
+        self.fit_table.heading("#0", text="параметр")
+        for column, text, width in (("value", "значение", 90), ("error", "±", 60), ("unit", "ед.", 60)):
+            self.fit_table.heading(column, text=text)
+            self.fit_table.column(column, width=width, anchor="center")
+        self.fit_table.column("#0", width=140)
+        self.fit_table.pack(side=tk.TOP, fill=tk.Y, expand=True)
+        buttons = ttk.Frame(left)
+        buttons.pack(side=tk.TOP, fill=tk.X, pady=(3, 0))
+        self.undo_fit_button = ttk.Button(buttons, text="Вернуть значения до подгонки",
+                                          command=self.undo_fit, state="disabled")
+        self.undo_fit_button.pack(side=tk.LEFT)
+        middle = ttk.Frame(tab)
+        middle.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6)
+        self.fit_text = tk.Text(middle, wrap="word", height=9, width=60, font=FONT, relief="flat",
+                                background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
+        self.fit_text.pack(fill=tk.BOTH, expand=True)
+        self._set_fit_text(hints.FIT_EMPTY_TEXT)
+        self.resid_fig = Figure(figsize=(4.2, 2.3), dpi=100)
+        self.resid_fig.subplots_adjust(left=0.2, right=0.97, bottom=0.22, top=0.86)
+        self.ax_resid = self.resid_fig.add_subplot(111)
+        self.resid_canvas = FigureCanvasTkAgg(self.resid_fig, master=tab)
+        self.resid_canvas.get_tk_widget().pack(side=tk.RIGHT, fill=tk.Y)
+        Tooltip(self.resid_canvas.get_tk_widget(), hints.plain(hints.RESIDUAL_HINT))
+
+    def _set_fit_text(self, text):
+        self.fit_text.configure(state="normal")
+        self.fit_text.delete("1.0", "end")
+        self.fit_text.insert("end", text)
+        self.fit_text.configure(state="disabled")
+
+    def _build_ideality_tab(self):
+        box = ttk.Frame(self.results_tabs, padding=6)
+        self.results_tabs.add(box, text="Идеальность n")
         row = 0
         ttk.Label(box, text="n_эксп", font=("Segoe UI", 9, "bold")).grid(row=row, column=0, sticky="w")
         n_entry = ttk.Entry(box, textvariable=self.n_exp_var, width=10, justify="center", state="readonly")
         n_entry.grid(row=row, column=1, padx=3, sticky="w")
         Tooltip(n_entry, "Коэффициент идеальности по прямой ветви первой загруженной ВАХ (§6.3). "
-                         "Считается автоматически; при загрузке ВАХ подставляется в n (6.3).")
+                         "Считается автоматически; при загрузке ВАХ подставляется в n (6.3). "
+                         "Точнее n по всей ВАХ даёт «Подогнать к ВАХ».")
         row += 1
         ttk.Label(box, text="окно V₁ … V₂, В", font=FONT).grid(row=row, column=0, sticky="w")
         window = ttk.Frame(box)
@@ -425,9 +560,26 @@ class MesaApp(tk.Tk):
         self.n2_button.pack(side=tk.LEFT)
         row += 1
         self.ideality_lbl = ttk.Label(box, text="", foreground="#b35c00", font=FONT,
-                                      wraplength=560, justify="left")
+                                      wraplength=900, justify="left")
+        self.ideality_lbl.grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
         Tooltip(self.ideality_lbl, hints.plain(hints.reference("ideality")))
-        self.ideality_lbl.grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+    def _build_warnings_tab(self):
+        tab = ttk.Frame(self.results_tabs, padding=6)
+        self.results_tabs.add(tab, text="Предупреждения")
+        self.warnings_text = tk.Text(tab, wrap="word", height=8, font=FONT, relief="flat",
+                                     background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
+        self.warnings_text.pack(fill=tk.BOTH, expand=True)
+        self.warnings_tab = tab
+
+    def _build_mesa_tab(self):
+        tab = ttk.Frame(self.results_tabs, padding=2)
+        self.results_tabs.add(tab, text="Схема мезы")
+        self.mesa_fig = Figure(figsize=(5.0, 2.8), dpi=100)
+        self.mesa_fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.93)
+        self.ax_mesa = self.mesa_fig.add_subplot(111)
+        self.mesa_canvas = FigureCanvasTkAgg(self.mesa_fig, master=tab)
+        self.mesa_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
     # ---------------------------------------------------- наборы образцов
     def _apply_preset(self, preset):
@@ -512,11 +664,11 @@ class MesaApp(tk.Tk):
 
     def new_sample(self):
         """Новый образец: все числовые поля пустые, режим «Расширенная модель».
-        Введите измеренное, остальное заполнит «Автофит»."""
+        Введите измеренное, остальное заполнит «Заполнить пустые»."""
         self._apply_preset(presets.Preset(name="новый образец",
                                           params={**{key: None for key in SPECS},
                                                   "mode": presets.MODE_EXTENDED}))
-        self.status_lbl.config(text="Новый образец: введите измеренные значения, затем «Автофит» "
+        self.status_lbl.config(text="Новый образец: введите измеренные значения, затем «Заполнить пустые» "
                                     "заполнит остальные.", foreground="#222222")
 
     def autofit(self):
@@ -537,7 +689,7 @@ class MesaApp(tk.Tk):
         # режиме: так видно, с какими значениями идёт расчёт.
         filled = presets.autofill(values, list(SPECS), ideality)
         if not filled:
-            messagebox.showinfo("Автофит", "Пустых полей нет — заполнять нечего.")
+            messagebox.showinfo("Заполнить пустые", "Пустых полей нет — заполнять нечего.")
             return
         self._set_autofilled(filled)
         self.recompute()
@@ -550,14 +702,38 @@ class MesaApp(tk.Tk):
         return [presets.I_TYPE_TO_SCENARIO[i_type]]
 
     def _on_scenario_change(self, recompute=True):
-        """Доступность полей: режим (какие параметры свободны) и сценарий
-        (какие подвижности входят в модель). Значения полей не меняются."""
+        self._refresh_fields()
+        if recompute:
+            self.recompute()
+
+    def _on_mode_change(self):
+        self._on_scenario_change()
+
+    def _refresh_fields(self):
+        """Поля боковой панели: видны только используемые в режиме (или все,
+        если включено «показать все поля» — тогда лишние серые). Значения не
+        меняются. Подвижности, не входящие в сценарий, — серые."""
         scenarios = self._scenarios()
         mode = self.mode.get()
+        self.mode_lbl.config(text=hints.plain(hints.MODE_HINTS[mode]))
         editable = presets.editable_keys(mode)
         unused = set.intersection(*(UNUSED_BY_SCENARIO[sc] for sc in scenarios))
-        for key, entry in self.entries.items():
-            entry.state(["!disabled"] if key in editable and key not in unused else ["disabled"])
+        show_all = self.show_all.get()
+        for title, (section, keys) in self.sections.items():
+            visible = 0
+            for key in keys:
+                active = key in editable and key not in unused
+                self.entries[key].state(["!disabled"] if active else ["disabled"])
+                shown = show_all or key in editable
+                for widget in self.field_rows[key]:
+                    widget.grid() if shown else widget.grid_remove()
+                visible += shown
+            if title == BOUNDARY_TITLE:
+                visible = show_all or mode != presets.MODE_BASIC
+            if visible:
+                section.pack(fill=tk.X, pady=(3, 0))
+            else:
+                section.pack_forget()
         physical = mode != presets.MODE_BASIC
         for scenario, fields in BOUNDARY_FIELDS.items():
             for key, _label in fields:
@@ -567,15 +743,9 @@ class MesaApp(tk.Tk):
         fit = mode == presets.MODE_FIT
         for button in self.flag_buttons.values():
             button.state(["!disabled"] if fit else ["disabled"])
-        for button in (self.tau0_button, self.n2_button):
-            button.state(["!disabled"] if fit else ["disabled"])
+        self.n2_button.state(["!disabled"] if fit else ["disabled"])
         self.n_emp_button.state(["!disabled"] if mode == presets.MODE_BASIC else ["disabled"])
         self.autofit_button.state(["!disabled"] if physical else ["disabled"])
-        if recompute:
-            self.recompute()
-
-    def _on_mode_change(self):
-        self._on_scenario_change()
 
     def _read_params(self):
         params = {"substrate": self.substrate.get(), "i_type": self.i_type.get(),
@@ -595,9 +765,9 @@ class MesaApp(tk.Tk):
             except ValueError:
                 raise ValueError(f"«{SPECS[key].label}» задан некорректно: «{raw}»")
         if missing:
-            hint = ("введите значения или нажмите «Автофит» — он подставит значения по умолчанию "
+            hint = ("введите значения или нажмите «Заполнить пустые» — программа подставит значения по умолчанию "
                     "и оценки по данным." if self.mode.get() != presets.MODE_BASIC
-                    else "введите значения (или переключитесь в «Расширенную модель» и нажмите «Автофит»).")
+                    else "введите значения (или переключитесь в «Расширенную модель» и нажмите «Заполнить пустые»).")
             raise ValueError("Не заданы: " + ", ".join(missing) + ".\n" + hint)
         for key, var in self.bc_vars.items():
             params[key] = BOUNDARY_BY_LABEL[var.get()]
@@ -675,6 +845,95 @@ class MesaApp(tk.Tk):
             self.vars["tau0_bg"].set(f"{estimate.tau0_bg:.3g}")
             self.recompute()
 
+    # ------------------------------------------------------ автоподгонка
+    def start_fit(self):
+        """«Подогнать к ВАХ»: в базовом режиме — эмпирическая модель (J₀, n),
+        иначе — физическая (τ₀^bg, τ^bg); вместе с эквивалентной схемой.
+        Считается в фоне, окно не замирает."""
+        if self._fit_thread is not None:
+            return
+        if not self.exp_iv:
+            messagebox.showinfo("Подгонка", "Загрузите ВАХ: подгонка ищет параметры, при которых модель "
+                                            "совпадает с ней.")
+            return
+        try:
+            params = self._read_params()
+        except ValueError as e:
+            messagebox.showerror("Ошибка ввода параметров", str(e))
+            return
+        s = presets.to_structure(params, self._scenarios()[-1])
+        model = fitting.EMPIRICAL if self.mode.get() == presets.MODE_BASIC else fitting.PHYSICAL
+        data = self.exp_iv[0]
+        self._fit_backup = {key: var.get() for key, var in self.vars.items()}
+        self._fit_box = {"progress": ""}
+        self.fit_button.state(["disabled"])
+
+        def work():
+            try:
+                self._fit_box["result"] = fitting.fit_iv(
+                    s, data["voltage"], data["value"], model,
+                    progress=lambda text: self._fit_box.__setitem__("progress", text))
+            except Exception as error:     # сообщение показывается в главном потоке
+                self._fit_box["error"] = str(error)
+
+        self._fit_thread = threading.Thread(target=work, daemon=True)
+        self._fit_thread.start()
+        self._poll_fit()
+
+    def _poll_fit(self):
+        if self._fit_thread.is_alive():
+            self.status_lbl.config(text=f"Подгонка к ВАХ… {self._fit_box['progress']}", foreground=AUTO_COLOR)
+            self.after(200, self._poll_fit)
+            return
+        self._fit_thread = None
+        self.fit_button.state(["!disabled"])
+        if "error" in self._fit_box:
+            messagebox.showerror("Подгонка", f"Подгонка не удалась: {self._fit_box['error']}")
+            self.recompute()
+            return
+        self._apply_fit(self._fit_box["result"])
+
+    def _apply_fit(self, result):
+        """Найденные значения — в поля (выделены синим), результат — во вкладку."""
+        self.fit_result = result
+        source = "автоподгонка к ВАХ (§6.7)"
+        values = {key: float(f"{value:.5g}") if np.isfinite(value) else value
+                  for key, value in result.structure_values().items() if key in self.vars}
+        self._set_autofilled({key: (value, source) for key, value in values.items()})
+        self._take_from_iv = False      # n и J₀ уже найдены подгонкой — не подставлять n_эксп
+        self.undo_fit_button.state(["!disabled"])
+        self._show_fit_result(result)
+        self.results_tabs.select(0)
+        self.recompute()
+
+    def undo_fit(self):
+        if not self._fit_backup:
+            return
+        for key, value in self._fit_backup.items():
+            self.vars[key].set(value)
+        self._set_autofilled({})
+        self._fit_backup = None
+        self.undo_fit_button.state(["disabled"])
+        self._set_fit_text("Значения до подгонки восстановлены. " + hints.FIT_EMPTY_TEXT)
+        self.recompute()
+
+    def _show_fit_result(self, result):
+        self.fit_table.delete(*self.fit_table.get_children())
+        for key, value in result.params.items():
+            log_scale = fitting.PARAMS[key][1]
+            sigma = result.stderr.get(key, float("nan"))
+            if not np.isfinite(value) or value == 0:
+                text, error = ("выкл." if key in ("I_L", "I_mod") else _fmt(value)), ""
+            else:
+                text = f"{value:.4g}"
+                error = "" if not np.isfinite(sigma) else (f"{100 * sigma:.1f} %" if log_scale else f"{sigma:.2g}")
+            self.fit_table.insert("", "end", text=fitting.LABELS[key],
+                                  values=(text, error, fitting.UNITS[key]))
+        model = "эмпирическая (6.3)" if result.model == fitting.EMPIRICAL else "физическая (§4–§6)"
+        head = (f"Модель: {model}. Ошибка (6.10): {100 * result.error:.2f} %. "
+                "Найденные значения подставлены в поля и выделены синим.\n")
+        self._set_fit_text(head + "\n".join("• " + note for note in result.notes))
+
     # --------------------------------------------- экспериментальные данные
     def _load_experimental_files(self, dialog_title, target_list, error_title):
         paths = filedialog.askopenfilenames(
@@ -733,7 +992,8 @@ class MesaApp(tk.Tk):
         window = self._ideality_window(params)
         model_window = window or ((self.ideality.V1, self.ideality.V2) if self.ideality else None)
         main_result = self.results[main.scenario]
-        self.model_ideality = ph.ideality_from_data(V, main_result.I, main.T, main.Rs, model_window)
+        self.model_ideality = ph.ideality_from_data(V, main_result.I, main.T, main.Rs, model_window,
+                                                    I_mod=main.I_mod)
         n_exp = self.ideality.n if self.ideality else None
 
         self.comparison = None
@@ -746,11 +1006,44 @@ class MesaApp(tk.Tk):
                                                   metadata=self.preset.metadata)
 
         self._V, self._n_exp = V, n_exp
+        self._update_deviation(main)
         self._redraw()
         self._plot_mesa(params, main)
         self._update_status(n_exp, n_mod)
         if self.formulas_window is not None:
             self.formulas_window.refresh()
+
+    def _update_deviation(self, s):
+        """Отклонение модели от первой ВАХ в её точках: (V, отклонение, δ (6.10))."""
+        self.deviation = None
+        if self.exp_iv:
+            V, I = fitting.prepare_data(self.exp_iv[0]["voltage"], self.exp_iv[0]["value"], max_points=600)
+            if V.size:
+                I_model = ph.solve_iv(s, V).I
+                floor = 10.0 * fitting.current_scale(I)
+                deviation = (I_model - I) / np.maximum(np.abs(I), floor)
+                self.deviation = (V, deviation, fitting.relative_error(I_model, I, floor))
+        self._plot_deviation()
+
+    def _plot_deviation(self):
+        ax = self.ax_resid
+        ax.clear()
+        ax.set_title("Отклонение модели от ВАХ", fontsize=9)
+        ax.set_xlabel("V, В", fontsize=8)
+        ax.set_ylabel("(I_мод − I_эксп)/|I_эксп|, %", fontsize=7)
+        ax.tick_params(labelsize=7)
+        ax.axhline(0, color="#999999", linewidth=0.7)
+        if self.deviation is not None:
+            V, deviation, delta = self.deviation
+            ax.plot(V, 100 * deviation, ".", ms=2, color=SINGLE_COLOR)
+            limit = max(1.0, min(100.0, float(np.nanpercentile(np.abs(100 * deviation), 98)) * 1.2))
+            ax.set_ylim(-limit, limit)
+            ax.set_title(f"Отклонение модели от ВАХ: δ = {100 * delta:.2f} %", fontsize=9)
+        else:
+            ax.text(0.5, 0.5, "загрузите ВАХ", ha="center", va="center", transform=ax.transAxes,
+                    color="#888888")
+        ax.grid(True, linewidth=0.4, alpha=0.6)
+        self.resid_canvas.draw_idle()
 
     def _redraw(self):
         """Перерисовка графиков без пересчёта (галочки кривых)."""
@@ -772,14 +1065,18 @@ class MesaApp(tk.Tk):
         self.ideality, self.ideality_notes = None, []
         self.ideality_short, self.ideality_message = "", ""
         T, Rs = self._value_or_default(params, "T"), self._value_or_default(params, "Rs")
+        I_mod = self._value_or_default(params, "I_mod")
         if self.exp_iv:
             first = self.exp_iv[0]
             self.ideality = ph.ideality_from_data(first["voltage"], first["value"], T, Rs,
                                                   self._ideality_window(params),
-                                                  diagnostics=self.ideality_notes)
+                                                  diagnostics=self.ideality_notes, I_mod=I_mod)
             rs_limit = ph.series_resistance_limit(first["voltage"], first["value"])
+            # с предельным наклоном dV/dI сравнивается дифференциальное сопротивление
+            # d(I·R_s(I))/dI = R_s/(1 + |I|/I_mod)² на верху прямой ветви (6.9)
+            Rs_top = Rs / (1.0 + float(np.max(np.abs(first["value"]))) / I_mod) ** 2
             self.ideality_short, self.ideality_message = hints.ideality_failure_text(
-                first["label"], self.ideality_notes, Rs, rs_limit, self.ideality is not None)
+                first["label"], self.ideality_notes, Rs_top, rs_limit, self.ideality is not None)
         if self.ideality:
             self.n_exp_var.set(f"{self.ideality.n:.3f}")
             if self.window_auto.get():
@@ -819,12 +1116,21 @@ class MesaApp(tk.Tk):
         else:
             parts.append("n_эксп = — (нет ВАХ)")
         parts.append(f"n_мод = {n_mod:.3f}" if n_mod else "n_мод = —")
-        count = len(self.reference_data.warnings) if self.reference_data else 0
+        if self.deviation is not None:
+            parts.append(f"отклонение от ВАХ δ = {100 * self.deviation[2]:.2f} %")
+        warnings = list(self.reference_data.warnings) if self.reference_data else []
+        count = len(warnings)
+        self.warnings_text.configure(state="normal")
+        self.warnings_text.delete("1.0", "end")
+        self.warnings_text.insert("end", "\n".join("⚠ " + hints.plain(w) for w in warnings)
+                                  or "Предупреждений нет.")
+        self.warnings_text.configure(state="disabled")
+        self.results_tabs.tab(self.warnings_tab, text=f"Предупреждения ({count})")
         if count:
             word = ("предупреждение" if count % 10 == 1 and count % 100 != 11 else
                     "предупреждения" if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14 else
                     "предупреждений")
-            parts.append(f"⚠ {count} {word} — см. Справочник")
+            parts.append(f"⚠ {count} {word} — вкладка «Предупреждения»")
         self.status_lbl.config(text="   |   ".join(parts),
                                foreground="#b35c00" if count else "#222222")
 

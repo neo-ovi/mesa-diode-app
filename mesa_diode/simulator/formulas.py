@@ -582,7 +582,7 @@ def fit_guide():
     sections.append(("Граничные условия: сток, отражение, длинная база", [
         text for text in hints.BOUNDARY_HINTS.values()] + [SCENARIO_BOUNDARIES, "Выбираются в расширенном режиме и в «Подгонке»; формулы — §4."]))
     sections.append(("Табличные значения и почему именно они", table_values()))
-    sections.append(("Автофит и пустые поля", [hints.AUTOFIT_HINT + " " + hints.reference("autofit")]))
+    sections.append(("Заполнить пустые поля", [hints.AUTOFIT_HINT + " " + hints.reference("autofit")]))
     sections.append(("V_{bi} и строка статуса", [hints.STATUS_HINT + " " + hints.reference("vbi")]))
     sections.append(("Что измеряется и что рассчитывается",
                      [f"• {what}: {result}" for what, result in hints.MEASUREMENTS]))

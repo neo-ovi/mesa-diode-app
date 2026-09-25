@@ -103,8 +103,11 @@ EMPIRICAL_KEYS = frozenset({"n_emp", "J0_emp"})
 # Эквивалентная схема (R_s, его модуляция, шунт, нелинейная утечка) нужна
 # и эмпирической, и физической модели: без неё не описать изгиб ветвей ВАХ.
 CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
-BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T"}) | CIRCUIT_KEYS | EMPIRICAL_KEYS
-MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub",
+# ρ подложки — в базовом режиме: в сценарии B подложка — p-сторона перехода,
+# и по ρ_sub (2.8) считаются V_bi, ширина ОПЗ и ВФХ.
+BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "T"})
+              | CIRCUIT_KEYS | EMPIRICAL_KEYS)
+MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um",
                                                  "N_dis"} | STORED_KEYS
 FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
                            "tau_n_bg", "tau_p_bg", "tau0_bg", "n2"})

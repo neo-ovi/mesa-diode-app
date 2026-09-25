@@ -629,7 +629,8 @@ def fit_guide():
     sections.append(("Табличные значения и почему именно они", table_values()))
     sections.append(("Подогнать к ВАХ и график отклонений", [
         hints.FIT_HINT + " " + hints.reference("fit"),
-        hints.RESIDUAL_HINT + " " + hints.reference("deviation")]))
+        hints.RESIDUAL_HINT + " " + hints.reference("deviation"),
+        hints.LOCK_HINT + " " + hints.reference("lock")]))
     sections.append(("Заполнить пустые поля", [hints.AUTOFIT_HINT + " " + hints.reference("autofit")]))
     sections.append(("V_{bi} и строка статуса", [hints.STATUS_HINT + " " + hints.reference("vbi")]))
     sections.append(("Что измеряется и что рассчитывается",

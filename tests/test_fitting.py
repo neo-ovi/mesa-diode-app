@@ -97,3 +97,40 @@ def test_reference_iv_is_described_within_one_percent():
     r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
     assert r.error < 0.01
     assert set(r.terms) == {fitting.TERM_LEAK, fitting.TERM_MOD}
+
+
+def test_locked_parameters_keep_entered_values():
+    """Зафиксированные поля не меняются, остальное подбирается."""
+    s = _empirical()
+    V, I = _synthetic(s, noise=0.002, quantum=1e-7)
+    start = replace_params(s, Rs=130.0, n_emp=1.5, I_L=0.0, I_mod=float("inf"))
+    r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, locked={"Rs", "tau_n_bg"})
+    assert r.params["Rs"] == 130.0 and "Rs" in r.locked
+    assert r.params["n_emp"] == pytest.approx(1.3, rel=0.05)
+    assert any("Зафиксированы" in n for n in r.notes)
+
+
+def test_locked_mechanism_switch():
+    """I_L = 0 с галочкой выключает утечку, ненулевой I_mod с галочкой — включает модуляцию."""
+    s = _empirical()
+    V, I = _synthetic(s, noise=0.002, quantum=1e-7)
+    off = fitting.fit_iv(replace_params(s, I_L=0.0), V, I, fitting.EMPIRICAL, locked={"I_L"})
+    assert all(fitting.TERM_LEAK not in c.terms for c in off.candidates)
+    on = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, locked={"I_mod"})
+    assert all(fitting.TERM_MOD in c.terms for c in on.candidates)
+    assert on.params["I_mod"] == 0.08
+
+
+def test_everything_locked_only_evaluates():
+    s = _empirical()
+    V, I = _synthetic(s)
+    r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, locked=fitting.fittable_fields(fitting.EMPIRICAL))
+    assert r.error < 1e-6 and len(r.candidates) == 1
+
+
+def test_fittable_fields():
+    assert fitting.fittable_fields(fitting.EMPIRICAL) == {"J0_emp", "n_emp", "Rs", "Rsh", "I_L",
+                                                          "m_leak", "I_mod"}
+    phys = fitting.fittable_fields(fitting.PHYSICAL)
+    assert {"tau0_bg", "tau_n_bg", "tau_p_bg"} <= phys and "n_emp" not in phys
+    assert "rho_sub" in presets.editable_keys(presets.MODE_BASIC)

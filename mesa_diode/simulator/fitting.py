@@ -60,6 +60,19 @@ UNITS = {"J0_emp": "А/см²", "n_emp": "—", "Rs": "Ом", "Rsh": "Ом", "I_
 LABELS = {"J0_emp": "J₀", "n_emp": "n", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
           "I_mod": "I_mod", "tau0_bg": "τ₀^bg", "tau_bg": "τ_n^bg = τ_p^bg"}
 
+# Поле окна (presets) → параметр подгонки; τ_n^bg и τ_p^bg подбираются общим
+# множителем tau_bg, поэтому фиксируются вместе.
+FIELD_TO_PARAM = {"J0_emp": "J0_emp", "n_emp": "n_emp", "Rs": "Rs", "Rsh": "Rsh", "I_L": "I_L",
+                  "m_leak": "m_leak", "I_mod": "I_mod", "tau0_bg": "tau0_bg",
+                  "tau_n_bg": "tau_bg", "tau_p_bg": "tau_bg"}
+
+
+def fittable_fields(model):
+    """Поля окна, которые подгонка модели model может изменить."""
+    params = set(CORE[model]) | {p for _name, keys in TERMS.values() for p in keys}
+    return {f for f, p in FIELD_TO_PARAM.items() if p in params}
+
+
 BIC_GAIN = 10.0        # механизм добавляется, если BIC падает больше чем на 10 [KR95]
 MAX_POINTS = 400       # точки ВАХ для подгонки (равномерно по напряжению)
 
@@ -88,6 +101,7 @@ class FitResult:
     I_model: np.ndarray
     candidates: list = field(default_factory=list)
     notes: list = field(default_factory=list)
+    locked: tuple = ()              # параметры подгонки, зафиксированные пользователем
 
     def structure_values(self):
         """Значения для полей окна (ключи presets): τ_bg → τ_n^bg и τ_p^bg."""
@@ -196,6 +210,9 @@ def _fit_keys(model, s, V, I, keys, start, I_ref):
         r = np.arcsinh(np.nan_to_num(Im, nan=0.0) / I_ref) - target
         return np.where(np.isfinite(Im), r, 50.0)
 
+    if not keys:                   # всё зафиксировано — только расчёт невязок
+        return {}, np.empty((V.size, 0)), residuals(x0), logs
+
     result = least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac", max_nfev=400)
     return unpack(result.x), result.jac, result.fun, logs
 
@@ -216,12 +233,41 @@ def _stderr(keys, logs, jac, res):
     return out
 
 
-def fit_iv(s, V, I, model=EMPIRICAL, progress=None):
+def _variants(s, lock):
+    """Проверяемые наборы механизмов с учётом фиксированных параметров.
+
+    Зафиксированный I_L = 0 (или I_mod = ∞) выключает механизм, ненулевой
+    (конечный) — включает его во всех вариантах."""
+    variants = [(), (TERM_LEAK,), (TERM_MOD,), (TERM_LEAK, TERM_MOD)]
+    if "I_L" in lock:
+        forced = s.I_L > 0
+        variants = [v for v in variants if (TERM_LEAK in v) == forced]
+    if "I_mod" in lock:
+        forced = np.isfinite(s.I_mod)
+        variants = [v for v in variants if (TERM_MOD in v) == forced]
+    return variants
+
+
+def _locked_values(s, lock):
+    """Значения зафиксированных параметров (для таблицы результата)."""
+    values = {}
+    for key in lock:
+        if key == "tau_bg":
+            if s.tau_n_bg == s.tau_p_bg:
+                values[key] = s.tau_n_bg
+        else:
+            values[key] = getattr(s, PARAMS[key][0])
+    return values
+
+
+def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=()):
     """Подгонка ВАХ с выбором механизмов (§6.7).
 
     s — Structure с текущими параметрами (геометрия, легирование и т. д.);
     model — EMPIRICAL (эмпирическая модель (6.3)) или PHYSICAL (§4–§6).
-    progress(text) — необязательный вызов для строки состояния."""
+    progress(text) — необязательный вызов для строки состояния.
+    locked — поля окна (ключи presets), зафиксированные пользователем: их
+    значения берутся из s и не меняются."""
     base = replace(s, model=ph.MODEL_EMPIRICAL if model == EMPIRICAL else ph.MODEL_PHYSICAL)
     V, I = prepare_data(V, I)
     if V.size < 8:
@@ -229,24 +275,26 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None):
     I_ref = current_scale(I)
     floor = 10.0 * I_ref
     start = _start_values(model, base, V, I)
+    lock = {FIELD_TO_PARAM[f] for f in locked if f in FIELD_TO_PARAM}
+    held = _locked_values(base, lock)
 
     # Выключенные механизмы: утечка I_L = 0, модуляция I_mod = ∞.
     off = {"I_L": 0.0, "I_mod": float("inf")}
-    variants = [(), (TERM_LEAK,), (TERM_MOD,), (TERM_LEAK, TERM_MOD)]
     candidates = []
     best = None
-    for terms in variants:
+    for terms in _variants(base, lock):
         if progress:
             progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
-        keys = list(CORE[model]) + [p for t in terms for p in TERMS[t][1]]
-        fixed = {k: v for k, v in off.items() if k not in keys}
+        used = list(CORE[model]) + [p for t in terms for p in TERMS[t][1]]
+        keys = [k for k in used if k not in lock]
+        fixed = {k: v for k, v in off.items() if k not in used}
         s_run = apply(base, fixed)
         # старт — лучший предыдущий результат (кроме выключенных механизмов: 0 и ∞)
         seed = dict(start)
         if best is not None:
             seed.update({k: v for k, v in best.params.items() if np.isfinite(v) and v > 0})
         values, jac, res, logs = _fit_keys(model, s_run, V, I, keys, seed, I_ref)
-        values_all = {**fixed, **values}
+        values_all = {**fixed, **{k: v for k, v in held.items() if k in used}, **values}
         Im = model_current(s_run, V, values)
         cand = Candidate(terms=terms, params=values_all, error=relative_error(Im, I, floor),
                          bic=bic(res, len(keys)))
@@ -264,7 +312,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None):
         error=best.error,
         error_forward=relative_error(Im[fwd], I[fwd], floor) if fwd.any() else float("nan"),
         error_reverse=relative_error(Im[rev], I[rev], floor) if rev.any() else float("nan"),
-        bic=best.bic, V=V, I_exp=I, I_model=Im, candidates=candidates)
+        bic=best.bic, V=V, I_exp=I, I_model=Im, candidates=candidates, locked=tuple(sorted(lock)))
     result.notes = explain(result, base)
     return result
 
@@ -330,7 +378,8 @@ def explain(result, s):
                          "сквозных дислокаций [Кур74, с. 167–168].")
     if result.model == PHYSICAL and "tau0_bg" in p:
         tau_dis = ph.dislocation_lifetime(ph.scr_sigma_R(s), s.N_dis)
-        text = f"τ₀^bg = {p['tau0_bg']:.3g} с, τ^bg = {p['tau_bg']:.3g} с"
+        tau_bg = p.get("tau_bg", float("nan"))
+        text = f"τ₀^bg = {p['tau0_bg']:.3g} с, τ^bg = {tau_bg:.3g} с"
         if np.isfinite(tau_dis):
             text += (f"; дислокации при N_dis = {s.N_dis:g} см⁻² дали бы τ_dis = {tau_dis:.3g} с (5.10)")
             if tau_dis > 100 * p["tau0_bg"]:
@@ -343,6 +392,9 @@ def explain(result, s):
         if np.isfinite(share):
             text += f": по (6.6) доля тока ОПЗ ≈ {100 * share:.0f} %, остальное — диффузия"
         notes.append(text + ".")
+    if result.locked:
+        names = ", ".join(LABELS[k] for k in result.locked)
+        notes.append(f"Зафиксированы пользователем (не подбирались): {names}.")
     notes.append(f"Итог: ошибка (6.10) {100 * result.error:.2f} % (прямая ветвь "
                  f"{100 * result.error_forward:.2f} %, обратная {100 * result.error_reverse:.2f} %).")
     return notes

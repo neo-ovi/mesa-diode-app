@@ -121,6 +121,10 @@ class MesaApp(tk.Tk):
         self.exp_cv = []
 
         self.vars = {key: tk.StringVar() for key in SPECS}
+        # «Зафиксировать при подгонке»: только для полей, которые подгонка может менять;
+        # остальные поля подгонка не трогает никогда (их галочка всегда стоит и серая).
+        self.lock_vars = {key: tk.BooleanVar(value=False) for key in fitting.FIELD_TO_PARAM}
+        self._always_locked = tk.BooleanVar(value=True)
         self.i_type = tk.StringVar(value=presets.I_TYPE_N)
         self.substrate = tk.StringVar(value="Ge")
         self.bc_vars = {key: tk.StringVar() for key in presets.CHOICE_FIELDS}
@@ -291,7 +295,11 @@ class MesaApp(tk.Tk):
         show_all.pack(anchor="w")
         Tooltip(show_all, "Показать и поля, не используемые в текущем режиме (они серые). "
                           "Их значения сохраняются в наборе.")
-        self.entries, self.field_rows, self.sections = {}, {}, {}
+        lock_note = ttk.Label(step, text="☑ справа от поля — зафиксировать при подгонке",
+                              foreground="#555555", font=FONT)
+        lock_note.pack(anchor="w")
+        Tooltip(lock_note, hints.plain(hints.with_reference(hints.LOCK_HINT, "lock")))
+        self.entries, self.field_rows, self.sections, self.lock_buttons = {}, {}, {}, {}
         for title, keys in SIDEBAR_GROUPS:
             section = self._section(step, title)
             for row_index, key in enumerate(keys):
@@ -375,6 +383,11 @@ class MesaApp(tk.Tk):
         bind_wheel(entry, lambda direction, fine, key=key: self._on_wheel(key, direction, fine))
         unit = ttk.Label(box, text=spec.unit, font=FONT, foreground="#555555")
         unit.grid(row=row, column=2, sticky="w")
+        box.columnconfigure(2, minsize=56)
+        lock = ttk.Checkbutton(box, variable=self.lock_vars.get(key, self._always_locked),
+                               command=lambda key=key: self._on_lock(key))
+        lock.grid(row=row, column=3, sticky="e", padx=(2, 0))
+        Tooltip(lock, lambda key=key: self._lock_tip(key))
 
         def tooltip_text(key=key, head=f"{spec.label}.\n{hint}"):
             source = self.autofilled.get(key)
@@ -383,7 +396,28 @@ class MesaApp(tk.Tk):
         for widget in (label, entry):
             Tooltip(widget, tooltip_text)
         self.entries[key] = entry
-        self.field_rows[key] = (label, entry, unit)
+        self.lock_buttons[key] = lock
+        self.field_rows[key] = (label, entry, unit, lock)
+
+    def _fit_model(self):
+        return fitting.EMPIRICAL if self.mode.get() == presets.MODE_BASIC else fitting.PHYSICAL
+
+    def _locked_fields(self):
+        return {key for key, var in self.lock_vars.items() if var.get()}
+
+    def _on_lock(self, key):
+        """τ_n^bg и τ_p^bg подбираются общим множителем — фиксируются вместе."""
+        if key in ("tau_n_bg", "tau_p_bg"):
+            other = "tau_p_bg" if key == "tau_n_bg" else "tau_n_bg"
+            self.lock_vars[other].set(self.lock_vars[key].get())
+
+    def _lock_tip(self, key):
+        if key not in fitting.fittable_fields(self._fit_model()):
+            return hints.plain("Этот параметр подгонка не меняет никогда: он измеряется или задаётся "
+                               "таблицей. " + hints.reference("lock"))
+        state = ("Зафиксирован: подгонка оставит введённое значение." if self.lock_vars[key].get()
+                 else "Не зафиксирован: подгонка может изменить значение.")
+        return hints.plain(f"{state}\n{hints.LOCK_HINT}\n{hints.reference('lock')}")
 
     def _clear_autofilled(self, key):
         if self.autofilled.pop(key, None) is not None:
@@ -598,6 +632,9 @@ class MesaApp(tk.Tk):
         for key, var in self.flag_vars.items():
             var.set(bool(params[key]))
         self.i_type.set(params["i_type"])
+        locked = set(params.get("locked") or ())
+        for key, var in self.lock_vars.items():
+            var.set(key in locked)
         self.substrate.set(params.get("substrate", "Ge"))
         self.mode.set(params["mode"] if params["mode"] in presets.MODES else presets.MODE_FIT)
         v1, v2 = params.get("ideality_V1"), params.get("ideality_V2")
@@ -719,6 +756,7 @@ class MesaApp(tk.Tk):
         mode = self.mode.get()
         self.mode_lbl.config(text=hints.plain(hints.MODE_HINTS[mode]))
         editable = presets.editable_keys(mode)
+        fittable = fitting.fittable_fields(self._fit_model())
         unused = set.intersection(*(UNUSED_BY_SCENARIO[sc] for sc in scenarios))
         show_all = self.show_all.get()
         for title, (section, keys) in self.sections.items():
@@ -726,6 +764,8 @@ class MesaApp(tk.Tk):
             for key in keys:
                 active = key in editable and key not in unused
                 self.entries[key].state(["!disabled"] if active else ["disabled"])
+                can_lock = active and key in fittable
+                self.lock_buttons[key].state(["!disabled"] if can_lock else ["disabled"])
                 shown = show_all or key in editable
                 for widget in self.field_rows[key]:
                     widget.grid() if shown else widget.grid_remove()
@@ -751,7 +791,7 @@ class MesaApp(tk.Tk):
 
     def _read_params(self):
         params = {"substrate": self.substrate.get(), "i_type": self.i_type.get(),
-                  "mode": self.mode.get()}
+                  "mode": self.mode.get(), "locked": sorted(self._locked_fields())}
         editable = presets.editable_keys(self.mode.get())
         missing = []
         for key, var in self.vars.items():
@@ -864,7 +904,13 @@ class MesaApp(tk.Tk):
             messagebox.showerror("Ошибка ввода параметров", str(e))
             return
         s = presets.to_structure(params, self._scenarios()[-1])
-        model = fitting.EMPIRICAL if self.mode.get() == presets.MODE_BASIC else fitting.PHYSICAL
+        model = self._fit_model()
+        locked = self._locked_fields()
+        if fitting.fittable_fields(model) <= locked:
+            messagebox.showinfo("Подгонка", "Все подбираемые параметры зафиксированы — подбирать нечего. "
+                                            "Снимите галочку хотя бы у одного параметра.\n"
+                                            + hints.reference("lock"))
+            return
         data = self.exp_iv[0]
         self._fit_backup = {key: var.get() for key, var in self.vars.items()}
         self._fit_box = {"progress": ""}
@@ -874,7 +920,7 @@ class MesaApp(tk.Tk):
             try:
                 self._fit_box["result"] = fitting.fit_iv(
                     s, data["voltage"], data["value"], model,
-                    progress=lambda text: self._fit_box.__setitem__("progress", text))
+                    progress=lambda text: self._fit_box.__setitem__("progress", text), locked=locked)
             except Exception as error:     # сообщение показывается в главном потоке
                 self._fit_box["error"] = str(error)
 
@@ -899,8 +945,10 @@ class MesaApp(tk.Tk):
         """Найденные значения — в поля (выделены синим), результат — во вкладку."""
         self.fit_result = result
         source = "автоподгонка к ВАХ (§6.7)"
+        locked = {f for f, p in fitting.FIELD_TO_PARAM.items() if p in result.locked}
         values = {key: float(f"{value:.5g}") if np.isfinite(value) else value
-                  for key, value in result.structure_values().items() if key in self.vars}
+                  for key, value in result.structure_values().items()
+                  if key in self.vars and key not in locked}
         self._set_autofilled({key: (value, source) for key, value in values.items()})
         self._take_from_iv = False      # n и J₀ уже найдены подгонкой — не подставлять n_эксп
         self.undo_fit_button.state(["!disabled"])
@@ -924,7 +972,10 @@ class MesaApp(tk.Tk):
         for key, value in result.params.items():
             log_scale = fitting.PARAMS[key][1]
             sigma = result.stderr.get(key, float("nan"))
-            if not np.isfinite(value) or value == 0:
+            if key in result.locked:
+                text, error = (f"{value:.4g}" if np.isfinite(value) and value else
+                               ("выкл." if key in ("I_L", "I_mod") else _fmt(value))), "фикс."
+            elif not np.isfinite(value) or value == 0:
                 text, error = ("выкл." if key in ("I_L", "I_mod") else _fmt(value)), ""
             else:
                 text = f"{value:.4g}"
@@ -1141,11 +1192,13 @@ class MesaApp(tk.Tk):
         self.ideality_lbl.config(text=self.ideality_message)
         if self._take_from_iv and self.ideality:
             area = presets.to_structure(params).area
-            params["n_emp"] = float(f"{self.ideality.n:.3g}")
-            params["J0_emp"] = float(f"{self.ideality.I0 / area:.3g}")
-            self.vars["n_emp"].set(format_value(params["n_emp"]))
-            self.vars["J0_emp"].set(format_value(params["J0_emp"]))
-            for key in ("n_emp", "J0_emp"):
+            found = {"n_emp": float(f"{self.ideality.n:.3g}"),
+                     "J0_emp": float(f"{self.ideality.I0 / area:.3g}")}
+            for key, value in found.items():
+                if self.lock_vars[key].get():      # зафиксированное значение не трогаем
+                    continue
+                params[key] = value
+                self.vars[key].set(format_value(value))
                 self._clear_autofilled(key)
             # Флаг снимается только после подстановки: если n_эксп пока не найден
             # (например, R_s завышено), n и J₀ подставятся после исправления.

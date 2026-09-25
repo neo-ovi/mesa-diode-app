@@ -60,3 +60,25 @@ def test_hints_have_no_tex_and_plain_removes_markup():
 def test_rs_and_rsh_hints_explain_the_difference():
     assert "последовательно" in hints.PARAM_HINTS["Rs"]
     assert "параллельно" in hints.PARAM_HINTS["Rsh"]
+
+
+def test_every_message_gets_metodichka_reference():
+    from mesa_diode.simulator import physics as ph
+    _na, warnings = ph.acceptor_from_resistivity(40.0, 330.0)
+    text = hints.with_error_reference(warnings[0])
+    assert "п. 10.1а" in text and "T изм. ρ" in text and "Причина" in text
+    assert hints.error_reference("что-то неизвестное") == hints.DEFAULT_ERROR_REF
+    assert hints.with_error_reference("уже есть: методичка, п. 1.1") == "уже есть: методичка, п. 1.1"
+    assert hints.error_reference("Изоляция при -1 В: нет") == "п. 2.4"
+
+
+def test_passport_resistivity_is_read_at_measurement_temperature():
+    import numpy as np
+    from mesa_diode.simulator import physics as ph, presets
+    hot = presets.to_structure({"rho_sub": 40.0, "T": 330.0, "T_rho": 300.0})
+    assert np.isfinite(hot.substrate[0])
+    cold = presets.to_structure({"rho_sub": 40.0, "T": 300.0})
+    assert hot.substrate[0] == cold.substrate[0]        # N_A не зависит от T образца
+    assert ph.resistivity_max(300.0) == pytest.approx(59.8, rel=0.01)
+    assert ph.resistivity_max(330.0) == pytest.approx(13.1, rel=0.01)
+    assert not np.isfinite(presets.to_structure({"rho_sub": 40.0, "T_rho": 330.0}).substrate[0])

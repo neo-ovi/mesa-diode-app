@@ -126,12 +126,23 @@ def resistivity(NA, T, mat=GE):
     return 1.0 / (Q * (mat.mu_n_max * n0 + mat.mu_p_max * p0))
 
 
+def resistivity_max(T, mat=GE):
+    """ρ_max = 1/(2q·n_i·√(μ_n·μ_p)), Ом·см — наибольшее ρ материала при T.
+
+    Следует из (2.8) при n₀p₀ = n_i² (2.4): проводимость q(μ_n·n₀ + μ_p·n_i²/n₀)
+    минимальна при n₀ = n_i·√(μ_p/μ_n) [Зи, с. 36, ур. (47)]. Больше ρ_max не
+    бывает: собственные носители проводят ток при любом легировании."""
+    return 1.0 / (2.0 * Q * intrinsic_concentration(T, mat) * np.sqrt(mat.mu_n_max * mat.mu_p_max))
+
+
 def acceptor_from_resistivity(rho, T, mat=GE):
     """(2.8) N_A подложки по ρ_sub: решение ρ(N_A) совместно с (2.4).
 
-    ρ(N_A) немонотонна (максимум около собственной концентрации): при
-    ρ(0) < ρ ≤ ρ_max решений два — берётся большее, с предупреждением.
-    Возвращает (N_A, [предупреждения]); при ρ > ρ_max — (nan, [...]).
+    T — температура, при которой измерено ρ (не температура образца: N_A от
+    T не зависит, а ρ зависит сильно). ρ(N_A) немонотонна (максимум около
+    собственной концентрации): при ρ(0) < ρ ≤ ρ_max решений два — берётся
+    большее, с предупреждением. Возвращает (N_A, [предупреждения]); при
+    ρ > ρ_max — (nan, [...]).
     """
     warnings = []
     peak = minimize_scalar(lambda lg: -resistivity(10.0 ** lg, T, mat),
@@ -140,9 +151,16 @@ def acceptor_from_resistivity(rho, T, mat=GE):
     rho_max = resistivity(10.0 ** lg_peak, T, mat)
     rho_zero = resistivity(0.0, T, mat)
     if rho > rho_max:
+        ni = intrinsic_concentration(T, mat)
         return float("nan"), [
-            f"ρ_{{sub}} = {rho:g} Ом·см больше максимально возможного для {mat.name} "
-            f"({rho_max:.1f} Ом·см при T = {T:g} К): решения нет."]
+            f"ρ_{{sub}} = {rho:g} Ом·см больше максимально возможного для {mat.name} при "
+            f"T = {T:g} К ({rho_max:.1f} Ом·см): такой подложки не бывает, N_{{A}} найти нельзя. "
+            f"Причина: даже в чистом (собственном) {mat.name} ток переносят собственные носители "
+            f"n_{{i}} = {ni:.2g} см⁻³, поэтому ρ ≤ ρ_max = 1/(2q·n_{{i}}·√(μ_{{n}}μ_{{p}})) (2.8). "
+            "n_{i} быстро растёт с температурой, и ρ_max падает: около 60 Ом·см при 300 К и "
+            "13 Ом·см при 330 К. Что сделать: ρ из паспорта пластины измерено при комнатной "
+            "температуре — укажите её в поле «T изм. ρ» (не температуру образца); если ρ "
+            "измерено при этой температуре — проверьте значение и единицы."]
     if rho > rho_zero:
         warnings.append(
             f"ρ_{{sub}} = {rho:g} Ом·см > ρ(0) = {rho_zero:.1f} Ом·см: два решения "
@@ -200,6 +218,7 @@ class Structure:
     N_i: float
     rho_sub: float
     T: float = 300.0
+    T_rho: float = 300.0             # температура, при которой измерено ρ_sub, К
     scenario: str = SCENARIO_B
     mu_n: float = GE.mu_n_max        # электроны — неосновные в p-области
     mu_p_i: float = GE.mu_p_max      # дырки в i-слое
@@ -257,8 +276,9 @@ class Structure:
 
     @cached_property
     def substrate(self):
-        """N_A подложки по ρ_sub (2.8): (N_A, [предупреждения])."""
-        return acceptor_from_resistivity(self.rho_sub, self.T, self.material)
+        """N_A подложки по ρ_sub (2.8) при температуре измерения ρ T_ρ:
+        (N_A, [предупреждения]). N_A от температуры не зависит (полная ионизация)."""
+        return acceptor_from_resistivity(self.rho_sub, self.T_rho, self.material)
 
     # --- стороны перехода по сценарию (§5.2) ---
     @cached_property

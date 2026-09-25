@@ -61,7 +61,7 @@ SIDEBAR_WIDTH = 400
 SHORT_LABELS = {
     "D_um": "D (мезы)", "D_inner_um": "d кольца (схема)", "d_epi_um": "d_epi",
     "h_um": "h (травление)", "d_n_um": "d_n (n⁺)", "d_sub_um": "d_sub",
-    "ND_plus": "N_D⁺", "N_i": "N_i", "rho_sub": "ρ_sub", "T": "T",
+    "ND_plus": "N_D⁺", "N_i": "N_i", "rho_sub": "ρ_sub", "T_rho": "T изм. ρ", "T": "T",
     "mu_n": "μ_n (электроны)", "mu_p_i": "μ_p (i-слой)", "mu_p_nplus": "μ_p (n⁺)",
     "tau_n_bg": "τ_n^bg", "tau_p_bg": "τ_p^bg", "tau0_bg": "τ₀^bg (ОПЗ)",
     "N_dis": "N_dis", "sigma_R_epi": "σ_R (i, n⁺)", "sigma_R_sub": "σ_R (подложка)",
@@ -83,7 +83,7 @@ CURVES = {
 # Кривые, которых нет в данной модели (компоненты тока различаются).
 CURVES_BY_MODEL = {ph.MODEL_EMPIRICAL: {"diff", "gr", "emp_fit"}, ph.MODEL_PHYSICAL: {"emp"}}
 POSITIVE_KEYS = ("D_um", "d_epi_um", "h_um", "d_n_um", "d_sub_um", "ND_plus", "N_i",
-                 "rho_sub", "T", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
+                 "rho_sub", "T", "T_rho", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
                  "tau0_bg", "n2", "Rsh", "m_leak", "D_inner_um", "n_emp", "J0_emp")
 NONNEGATIVE_KEYS = ("N_dis", "sigma_R_epi", "sigma_R_sub", "Rs", "I_L",
                     "afm_rms_nm", "afm_defects", "xrd_fwhm", "hall_mu", "implant_dose",
@@ -664,7 +664,7 @@ class MesaApp(tk.Tk):
         try:
             params = self._read_params()
         except ValueError as e:
-            messagebox.showerror("Ошибка ввода параметров", str(e))
+            messagebox.showerror("Ошибка ввода параметров", hints.with_error_reference(str(e)))
             return
         path = filedialog.asksaveasfilename(title="Сохранить набор образца", defaultextension=".json",
                                             filetypes=[("Набор образца", "*.json")])
@@ -685,7 +685,7 @@ class MesaApp(tk.Tk):
         try:
             preset = presets.load_preset(path)
         except (OSError, ValueError) as e:
-            messagebox.showerror("Набор образца", str(e))
+            messagebox.showerror("Набор образца", hints.with_error_reference(str(e)))
             return
         self._apply_preset(preset)
         self.recompute()
@@ -866,7 +866,7 @@ class MesaApp(tk.Tk):
     def _estimate_tau0(self):
         title = "Оценка τ₀ по обратной ветви"
         if not self.exp_iv or not self.structures:
-            messagebox.showinfo(title, "Загрузите ВАХ с обратной ветвью.")
+            messagebox.showinfo(title, hints.with_error_reference("Загрузите ВАХ с обратной ветвью."))
             return
         data = self.exp_iv[0]
         s = self.structures[self._scenarios()[-1]]
@@ -874,13 +874,14 @@ class MesaApp(tk.Tk):
         notes = []
         estimate = ph.estimate_tau0_from_reverse(s, data["voltage"], data["value"], V_at, notes)
         if estimate is None:
-            messagebox.showinfo(title, f"«{data['label']}»: {notes[0] if notes else 'оценка не удалась'}.")
+            messagebox.showinfo(title, hints.with_error_reference(
+                f"«{data['label']}»: {notes[0] if notes else 'оценка τ₀ не удалась'}."))
             return
         text = (f"ВАХ «{data['label']}», V = {estimate.V:g} В, сценарий {s.scenario}.\n"
                 f"Ток ОПЗ после вычета шунта и диффузии: {estimate.I_gr:.3g} А.\n"
                 f"τ₀ = {estimate.tau0:.3g} с (обращение (5.4)).\n")
         if not np.isfinite(estimate.tau0_bg):
-            messagebox.showinfo(title, text + notes[-1] + ".")
+            messagebox.showinfo(title, hints.with_error_reference(text + notes[-1] + "."))
             return
         text += f"τ₀^bg = {estimate.tau0_bg:.3g} с по (5.10) с N_dis = {s.N_dis:g} см⁻².\n\nПодставить τ₀^bg?"
         if messagebox.askyesno(title, text):
@@ -895,13 +896,13 @@ class MesaApp(tk.Tk):
         if self._fit_thread is not None:
             return
         if not self.exp_iv:
-            messagebox.showinfo("Подгонка", "Загрузите ВАХ: подгонка ищет параметры, при которых модель "
-                                            "совпадает с ней.")
+            messagebox.showinfo("Подгонка", hints.with_error_reference(
+                "Загрузите ВАХ: подгонка ищет параметры, при которых модель совпадает с ней."))
             return
         try:
             params = self._read_params()
         except ValueError as e:
-            messagebox.showerror("Ошибка ввода параметров", str(e))
+            messagebox.showerror("Ошибка ввода параметров", hints.with_error_reference(str(e)))
             return
         s = presets.to_structure(params, self._scenarios()[-1])
         model = self._fit_model()
@@ -936,7 +937,8 @@ class MesaApp(tk.Tk):
         self._fit_thread = None
         self.fit_button.state(["!disabled"])
         if "error" in self._fit_box:
-            messagebox.showerror("Подгонка", f"Подгонка не удалась: {self._fit_box['error']}")
+            messagebox.showerror("Подгонка", hints.with_error_reference(
+                f"Подгонка не удалась: {self._fit_box['error']}"))
             self.recompute()
             return
         self._apply_fit(self._fit_box["result"])
@@ -1084,7 +1086,7 @@ class MesaApp(tk.Tk):
             if not np.isfinite(main.substrate[0]):
                 raise ValueError(main.substrate[1][0])
         except ValueError as e:
-            messagebox.showerror("Ошибка ввода параметров", str(e))
+            messagebox.showerror("Ошибка ввода параметров", hints.with_error_reference(str(e)))
             return
         self.preset.params = params
         d_i = self._value_or_default(params, "d_epi_um") - self._value_or_default(params, "d_n_um")
@@ -1233,7 +1235,8 @@ class MesaApp(tk.Tk):
         count = len(warnings)
         self.warnings_text.configure(state="normal")
         self.warnings_text.delete("1.0", "end")
-        self.warnings_text.insert("end", "\n".join("⚠ " + hints.plain(w) for w in warnings)
+        self.warnings_text.insert("end", "\n".join("⚠ " + hints.plain(hints.with_error_reference(w))
+                                            .replace("\nПодробнее: ", " Подробнее: ") for w in warnings)
                                   or "Предупреждений нет.")
         self.warnings_text.configure(state="disabled")
         self.results_tabs.tab(self.warnings_tab, text=f"Предупреждения ({count})")

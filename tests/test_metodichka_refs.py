@@ -35,3 +35,16 @@ def test_every_hint_reference_points_to_a_heading():
             if not re.search(pattern, text, flags=re.MULTILINE):
                 missing.append(f"{key}: {ref}")
     assert not missing, "нет в методичке: " + ", ".join(missing)
+
+
+def test_error_references_point_to_headings():
+    text = _metodichka_text()
+    refs = {ref for _pattern, ref in hints.ERROR_REFS} | {hints.DEFAULT_ERROR_REF}
+    missing = []
+    for ref in refs:
+        kind, number = ref.split(" ", 1)
+        pattern = (rf"^\*\*{re.escape(number)}[ .]" if kind == "п." else
+                   rf"^## Глава {re.escape(number)}\.")
+        if not re.search(pattern, text, flags=re.MULTILINE):
+            missing.append(ref)
+    assert not missing, "нет в методичке: " + ", ".join(missing)

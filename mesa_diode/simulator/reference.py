@@ -110,7 +110,9 @@ def reference_table(s, iv=None, n_exp=None, n_mod=None, metadata=None):
     p0, n0 = ph.equilibrium_carriers(N_sub, s.ni)
     g.add("N_{A} из ρ_{sub} (2.8)", N_sub, "см⁻³")
     g.add("n₀ / p₀", f"{n0:.3e} / {p0:.3e}", "см⁻³")
-    g.add("R_{sub} = ρ·d_{sub}/A (верхняя оценка)", s.rho_sub * s.d_sub / s.area, "Ом")
+    rho_T = ph.resistivity(N_sub, s.T, s.material)
+    g.add("ρ подложки при T (из N_{A})", rho_T, "Ом·см")
+    g.add("R_{sub} = ρ(T)·d_{sub}/A (верхняя оценка)", rho_T * s.d_sub / s.area, "Ом")
     groups.append(g)
 
     g = Group(f"Переход (сценарий {s.scenario})")

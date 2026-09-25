@@ -48,6 +48,7 @@ NUMERIC_PARAMS = [
     ParamSpec("rho_sub", "удельное сопротивление подложки ρ_sub", "Ом·см", "rho_sub"),
     ParamSpec("d_sub_um", "толщина подложки d_sub", "мкм", "d_sub", UM),
     ParamSpec("T", "температура T", "К", "T"),
+    ParamSpec("T_rho", "температура измерения ρ_sub", "К", "T_rho"),
     ParamSpec("mu_n", "μ_n электронов (неосновные)", "см²/(В·с)", "mu_n"),
     ParamSpec("mu_p_i", "μ_p дырок в i-слое", "см²/(В·с)", "mu_p_i"),
     ParamSpec("mu_p_nplus", "μ_p дырок в n⁺", "см²/(В·с)", "mu_p_nplus"),
@@ -105,7 +106,7 @@ EMPIRICAL_KEYS = frozenset({"n_emp", "J0_emp"})
 CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
 # ρ подложки — в базовом режиме: в сценарии B подложка — p-сторона перехода,
 # и по ρ_sub (2.8) считаются V_bi, ширина ОПЗ и ВФХ.
-BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "T"})
+BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "T_rho", "T"})
               | CIRCUIT_KEYS | EMPIRICAL_KEYS)
 MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um",
                                                  "N_dis"} | STORED_KEYS
@@ -133,6 +134,7 @@ DEFAULT_PARAMS = {
     "rho_sub": 5.0,
     "d_sub_um": 300.0,
     "T": 300.0,
+    "T_rho": 300.0,
     "mu_n": GE.mu_n_max,
     "mu_p_i": GE.mu_p_max,
     "mu_p_nplus": GE.mu_p_max,

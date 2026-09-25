@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from mesa_diode import config
+from mesa_diode.simulator import models
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator.materials import GE
 
@@ -67,6 +68,8 @@ NUMERIC_PARAMS = [
     # Эмпирическая модель (6.3) — базовый режим.
     ParamSpec("n_emp", "коэффициент идеальности n", "—", "n_emp"),
     ParamSpec("J0_emp", "плотность тока насыщения J₀", "А/см²", "J0_emp"),
+    ParamSpec("J01_2d", "ток насыщения диффузии J₀₁ (n = 1)", "А/см²", "J01_2d"),
+    ParamSpec("J02_2d", "ток насыщения ОПЗ J₀₂ (n = 2)", "А/см²", "J02_2d"),
     # Измерения и технология: хранятся в наборе, в расчёт не входят (кроме
     # оценки N_D⁺ = Q/d_n автофитом). Пустое поле — «не измерено» (None).
     ParamSpec("afm_rms_nm", "шероховатость RMS (АСМ)", "нм", None),
@@ -98,17 +101,21 @@ MODE_BASIC, MODE_EXTENDED, MODE_FIT = "basic", "extended", "fit"
 MODES = (MODE_BASIC, MODE_EXTENDED, MODE_FIT)
 MODE_LABELS = {MODE_BASIC: "Базовая модель", MODE_EXTENDED: "Расширенная модель",
                MODE_FIT: "Подгонка"}
+# Модель тока в режиме: базовый — выбранная из models.basic_models()
+# (поле basic_model), расширенный и «Подгонка» — физическая.
 MODE_MODEL = {MODE_BASIC: ph.MODEL_EMPIRICAL, MODE_EXTENDED: ph.MODEL_PHYSICAL,
               MODE_FIT: ph.MODEL_PHYSICAL}
-EMPIRICAL_KEYS = frozenset({"n_emp", "J0_emp"})
+BASIC_MODELS = tuple(m.key for m in models.basic_models())
+EMPIRICAL_KEYS = models.get(ph.MODEL_EMPIRICAL).fields
+MODEL_KEYS = models.model_fields()           # поля, нужные только своей модели тока
 # Эквивалентная схема (R_s, его модуляция, шунт, нелинейная утечка) нужна
 # и эмпирической, и физической модели: без неё не описать изгиб ветвей ВАХ.
 CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
 # ρ подложки — в базовом режиме: в сценарии B подложка — p-сторона перехода,
 # и по ρ_sub (2.8) считаются V_bi, ширина ОПЗ и ВФХ.
 BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "T_rho", "T"})
-              | CIRCUIT_KEYS | EMPIRICAL_KEYS)
-MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um",
+              | CIRCUIT_KEYS | MODEL_KEYS)
+MEASURED_KEYS = (BASIC_KEYS - MODEL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um",
                                                  "N_dis"} | STORED_KEYS
 FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
                            "tau_n_bg", "tau_p_bg", "tau0_bg", "n2"})
@@ -116,9 +123,21 @@ MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: MEASURED_KEYS,
              MODE_FIT: MEASURED_KEYS | FIT_ONLY_KEYS}
 
 
-def editable_keys(mode):
-    """Числовые параметры, доступные для правки в режиме mode."""
-    return MODE_KEYS.get(mode, MODE_KEYS[MODE_FIT])
+def editable_keys(mode, basic_model=None):
+    """Числовые параметры, доступные для правки в режиме mode. basic_model —
+    модель тока базового режима: поля других моделей тогда не нужны."""
+    keys = MODE_KEYS.get(mode, MODE_KEYS[MODE_FIT])
+    if mode == MODE_BASIC and basic_model is not None:
+        keys = keys - (MODEL_KEYS - models.get(basic_model).fields)
+    return keys
+
+
+def current_model(params):
+    """Ключ модели тока по параметрам набора (режим и basic_model)."""
+    mode = params.get("mode")
+    if mode == MODE_BASIC:
+        return params.get("basic_model") or ph.MODEL_EMPIRICAL
+    return MODE_MODEL.get(mode, ph.MODEL_PHYSICAL)
 
 # Нейтральные значения по умолчанию (не параметры какого-либо образца).
 DEFAULT_PARAMS = {
@@ -152,6 +171,9 @@ DEFAULT_PARAMS = {
     "m_leak": 3.0,
     "n_emp": 1.5,
     "J0_emp": 1e-6,
+    "J01_2d": 1e-7,
+    "J02_2d": 1e-5,
+    "basic_model": ph.MODEL_EMPIRICAL,
     "afm_rms_nm": None,
     "afm_defects": None,
     "xrd_fwhm": None,
@@ -238,7 +260,7 @@ def to_structure(params, scenario=None):
     kwargs.update({name: bool(merged[name]) for name in FLAG_FIELDS})
     if scenario is None:
         scenario = I_TYPE_TO_SCENARIO.get(merged["i_type"], ph.SCENARIO_B)
-    model = MODE_MODEL.get(merged["mode"], ph.MODEL_PHYSICAL)
+    model = current_model(merged)
     return ph.Structure(scenario=scenario, model=model, **kwargs)
 
 

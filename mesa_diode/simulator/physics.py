@@ -180,6 +180,8 @@ BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "дл�
 
 MODEL_PHYSICAL = "physical"     # физическая модель §2–§6
 MODEL_EMPIRICAL = "empirical"   # эмпирическая модель (6.3): J₀ и n задаются (базовый режим)
+MODEL_TWO_DIODE = "two_diode"   # двухдиодная модель (6.3а): J₀₁ (n = 1) и J₀₂ (n = 2)
+# Формулы тока перехода каждой модели — в реестре simulator/models.py.
 
 VBI_DEGENERATE = "degenerate"   # (3.1а), используется в расчёте всегда
 VBI_BOLTZMANN = "boltzmann"     # (3.1), для сравнения и эталонов §9
@@ -246,6 +248,8 @@ class Structure:
     model: str = MODEL_PHYSICAL
     J0_emp: float = 1e-6              # А/см², эмпирическая модель (6.3)
     n_emp: float = 1.5                # идеальность эмпирической модели (6.3)
+    J01_2d: float = 1e-7              # А/см², двухдиодная модель (6.3а): диффузия, n = 1
+    J02_2d: float = 1e-5              # А/см², двухдиодная модель (6.3а): ОПЗ, n = 2
     material: object = GE
 
     def with_scenario(self, scenario):
@@ -632,21 +636,17 @@ def leak_current(s, V):
 def components(s, Vd):
     """Компоненты тока (6.1) при напряжении на переходе V_d, А.
 
-    Физическая модель: I_diff, I_gr, I_sh, I_L. Эмпирическая (базовый режим):
-    I_emp = A·J₀·(e^{qV/nkT} − 1) по (6.3) [Ман20, с. 45, ур. (2)], I_sh, I_L."""
-    if s.model == MODEL_EMPIRICAL:
-        Vd = np.asarray(Vd, dtype=float)
-        return {
-            "emp": s.area * s.J0_emp * _expm1(Vd / (s.n_emp * s.Vt)),
-            "sh": shunt_current(s, Vd),
-            "L": leak_current(s, Vd),
-        }
-    return {
-        "diff": diffusion_current(s, Vd),
-        "gr": gr_current(s, Vd),
-        "sh": shunt_current(s, Vd),
-        "L": leak_current(s, Vd),
-    }
+    Ток перехода — по модели s.model из реестра models (физическая: I_diff,
+    I_gr; эмпирическая (6.3) [Ман20, с. 45, ур. (2)]: I_emp; двухдиодная
+    (6.3а) [Зи, с. 99, ур. (55)]: I_01, I_02); плюс общая для всех моделей
+    эквивалентная схема: шунт I_sh и нелинейная утечка I_L."""
+    from mesa_diode.simulator import models    # реестр импортирует physics
+
+    Vd = np.asarray(Vd, dtype=float)
+    parts = dict(models.get(s.model).parts(s, Vd))
+    parts["sh"] = shunt_current(s, Vd)
+    parts["L"] = leak_current(s, Vd)
+    return parts
 
 
 def junction_current(s, Vd):

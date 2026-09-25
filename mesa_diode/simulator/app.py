@@ -26,6 +26,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from mesa_diode.simulator import fitting
+from mesa_diode.simulator import models
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator import presets
 from mesa_diode.simulator import reference as ref
@@ -45,6 +46,8 @@ SCENARIO_COLORS = {ph.SCENARIO_A: "#1f4fb2", ph.SCENARIO_B: "#c0392b"}
 SINGLE_COLOR = "#1f6fb2"
 COMPONENT_STYLE = {
     "emp": ("I_emp (6.3)", "#17becf"),
+    "d1": ("I_01 (n = 1)", "#2ca02c"),
+    "d2": ("I_02 (n = 2)", "#ff7f0e"),
     "diff": ("I_diff", "#2ca02c"),
     "gr": ("I_gr", "#ff7f0e"),
     "sh": ("I_sh", "#7f7f7f"),
@@ -66,22 +69,26 @@ SHORT_LABELS = {
     "tau_n_bg": "τ_n^bg", "tau_p_bg": "τ_p^bg", "tau0_bg": "τ₀^bg (ОПЗ)",
     "N_dis": "N_dis", "sigma_R_epi": "σ_R (i, n⁺)", "sigma_R_sub": "σ_R (подложка)",
     "n2": "n₂ (ОПЗ)", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
-    "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)", "I_mod": "I_mod (R_s(I))",
+    "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)", "J01_2d": "J₀₁ (n = 1)", "J02_2d": "J₀₂ (n = 2)", "I_mod": "I_mod (R_s(I))",
     "afm_rms_nm": "RMS (АСМ)", "afm_defects": "дефекты (АСМ)", "xrd_fwhm": "FWHM (XRD)",
     "hall_mu": "μ Холла (i-слой)", "implant_dose": "доза n⁺ Q", "implant_energy": "энергия ионов",
     "anneal_T": "T отжига", "growth_T": "T роста",
 }
 # Подписи кривых для галочек: (график, ключ, подпись).
 CURVES = {
-    "iv": [("total", "модель"), ("emp", "I_emp"), ("diff", "I_diff"), ("gr", "I_gr"),
+    "iv": [("total", "модель"), ("emp", "I_emp"), ("d1", "I_01"), ("d2", "I_02"), ("diff", "I_diff"), ("gr", "I_gr"),
            ("sh", "I_sh"), ("L", "I_L"), ("emp_fit", "(6.3) по n_эксп"), ("exp", "эксперимент")],
     "cv": [("model_C", "модель"), ("exp", "эксперимент"), ("fit_C", "прямые 1/C²")],
-    "jv": [("total", "|J| модели"), ("emp", "J_emp"), ("diff", "J_diff"), ("gr", "J_gr"),
+    "jv": [("total", "|J| модели"), ("emp", "J_emp"), ("d1", "J_01"), ("d2", "J_02"), ("diff", "J_diff"), ("gr", "J_gr"),
            ("sh", "J_sh"), ("L", "J_L"), ("Js0", "J_s(0)"), ("emp_fit", "(6.3) по n_эксп"),
            ("js_exp", "J(S) эксп."), ("n_exp", "n(V) эксп."), ("n_mod", "n(V) модели")],
 }
 # Кривые, которых нет в данной модели (компоненты тока различаются).
-CURVES_BY_MODEL = {ph.MODEL_EMPIRICAL: {"diff", "gr", "emp_fit"}, ph.MODEL_PHYSICAL: {"emp"}}
+# Кривые компонент тока, которых нет в модели: все компоненты реестра, кроме своих.
+# «(6.3) по n_эксп» в эмпирической модели совпадает с самой моделью — скрыта.
+CURVES_BY_MODEL = {
+    key: (set(models.COMPONENTS) - set(m.components)) | ({"emp_fit"} if key == ph.MODEL_EMPIRICAL else set())
+    for key, m in models.MODELS.items()}
 POSITIVE_KEYS = ("D_um", "d_epi_um", "h_um", "d_n_um", "d_sub_um", "ND_plus", "N_i",
                  "rho_sub", "T", "T_rho", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
                  "tau0_bg", "n2", "Rsh", "m_leak", "D_inner_um", "n_emp", "J0_emp")
@@ -130,6 +137,7 @@ class MesaApp(tk.Tk):
         self.bc_vars = {key: tk.StringVar() for key in presets.CHOICE_FIELDS}
         self.flag_vars = {key: tk.BooleanVar() for key in presets.FLAG_FIELDS}
         self.mode = tk.StringVar(value=presets.MODE_BASIC)
+        self.basic_model = tk.StringVar(value=ph.MODEL_EMPIRICAL)   # модель тока базового режима
         self.cv_view = tk.StringVar(value="C")
         self.curve_vars = {(plot, key): tk.BooleanVar(value=True)
                            for plot, curves in CURVES.items() for key, _label in curves}
@@ -268,6 +276,18 @@ class MesaApp(tk.Tk):
         self.mode_lbl = ttk.Label(step, text="", foreground="#555555", font=FONT,
                                   wraplength=SIDEBAR_WIDTH - 40, justify="left")
         self.mode_lbl.pack(anchor="w", fill=tk.X, pady=(2, 0))
+        # Модель тока базового режима — из реестра models (basic=True).
+        self.model_row = ttk.Frame(step)
+        label = ttk.Label(self.model_row, text="Модель тока:", font=FONT)
+        label.pack(side=tk.LEFT)
+        self._model_by_label = {m.label: m.key for m in models.basic_models()}
+        self.model_box = ttk.Combobox(self.model_row, state="readonly", width=24,
+                                      values=list(self._model_by_label))
+        self.model_box.pack(side=tk.LEFT, padx=(4, 0))
+        self.model_box.bind("<<ComboboxSelected>>", self._on_current_model)
+        tip = hints.plain(hints.with_reference(hints.CURRENT_MODEL_HINT, "current_model"))
+        for widget in (label, self.model_box):
+            Tooltip(widget, tip)
 
         # Шаг 2. Образец
         step = self._step(body, "2. Образец")
@@ -406,7 +426,13 @@ class MesaApp(tk.Tk):
         self.field_rows[key] = (label, entry, unit, lock)
 
     def _fit_model(self):
-        return fitting.EMPIRICAL if self.mode.get() == presets.MODE_BASIC else fitting.PHYSICAL
+        """Модель тока текущего режима (ключ реестра models)."""
+        return presets.current_model({"mode": self.mode.get(), "basic_model": self.basic_model.get()})
+
+    def _on_current_model(self, _event=None):
+        self.basic_model.set(self._model_by_label[self.model_box.get()])
+        self._refresh_fields()
+        self.recompute()
 
     def _locked_fields(self):
         return {key for key, var in self.lock_vars.items() if var.get()}
@@ -638,6 +664,7 @@ class MesaApp(tk.Tk):
         for key, var in self.flag_vars.items():
             var.set(bool(params[key]))
         self.i_type.set(params["i_type"])
+        self.basic_model.set(params.get("basic_model") or ph.MODEL_EMPIRICAL)
         locked = set(params.get("locked") or ())
         for key, var in self.lock_vars.items():
             var.set(key in locked)
@@ -761,7 +788,12 @@ class MesaApp(tk.Tk):
         scenarios = self._scenarios()
         mode = self.mode.get()
         self.mode_lbl.config(text=hints.plain(hints.MODE_HINTS[mode]))
-        editable = presets.editable_keys(mode)
+        self.model_box.set(models.get(self.basic_model.get()).label)
+        if mode == presets.MODE_BASIC:
+            self.model_row.pack(anchor="w", fill=tk.X, pady=(3, 0))
+        else:
+            self.model_row.pack_forget()
+        editable = presets.editable_keys(mode, self.basic_model.get())
         fittable = fitting.fittable_fields(self._fit_model())
         unused = set.intersection(*(UNUSED_BY_SCENARIO[sc] for sc in scenarios))
         show_all = self.show_all.get()
@@ -793,13 +825,15 @@ class MesaApp(tk.Tk):
         for button in self.flag_buttons.values():
             button.state(["!disabled"] if fit else ["disabled"])
         self.n2_button.state(["!disabled"] if fit else ["disabled"])
-        self.n_emp_button.state(["!disabled"] if mode == presets.MODE_BASIC else ["disabled"])
+        empirical = self._fit_model() == ph.MODEL_EMPIRICAL
+        self.n_emp_button.state(["!disabled"] if empirical else ["disabled"])
         self.autofit_button.state(["!disabled"] if physical else ["disabled"])
 
     def _read_params(self):
         params = {"substrate": self.substrate.get(), "i_type": self.i_type.get(),
-                  "mode": self.mode.get(), "locked": sorted(self._locked_fields())}
-        editable = presets.editable_keys(self.mode.get())
+                  "mode": self.mode.get(), "basic_model": self.basic_model.get(),
+                  "locked": sorted(self._locked_fields())}
+        editable = presets.editable_keys(self.mode.get(), self.basic_model.get())
         missing = []
         for key, var in self.vars.items():
             raw = var.get().strip().replace(",", ".")
@@ -992,7 +1026,7 @@ class MesaApp(tk.Tk):
                          else (f"{100 * sigma:.1f} %" if log_scale else f"{sigma:.2g}"))
             self.fit_table.insert("", "end", text=fitting.LABELS[key],
                                   values=(text, error, fitting.UNITS[key]))
-        model = "эмпирическая (6.3)" if result.model == fitting.EMPIRICAL else "физическая (§4–§6)"
+        model = models.get(result.model).label
         head = (f"Модель: {model}. Ошибка (6.10): {100 * result.error:.2f} %. "
                 "Найденные значения подставлены в поля и выделены синим.\n")
         self._set_fit_text(head + "\n".join("• " + note for note in result.notes))
@@ -1412,10 +1446,7 @@ class MesaApp(tk.Tk):
                         ax.plot(V, comp, color=color, linewidth=0.9, linestyle="--",
                                 label=name.replace("I_", "J_", 1))
                 if self._visible("jv", "Js0"):
-                    if s.model == ph.MODEL_EMPIRICAL:
-                        Js0, name = s.J0_emp, "J₀"
-                    else:
-                        Js0, name = float(ph.saturation_current_density(s, 0.0)), "J_s(0)"
+                    Js0, name = models.get(s.model).saturation(s)
                     ax.axhline(Js0, color="#555555", linestyle="--", linewidth=0.8, label=f"{name} = {Js0:.2e}")
         area = next(iter(self.structures.values())).area
         T = next(iter(self.structures.values())).T

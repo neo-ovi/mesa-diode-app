@@ -5,8 +5,9 @@
 чтобы модель (6.1) с последовательным сопротивлением (6.9) совпала с
 измеренной ВАХ. Механизмы тока подключаются по необходимости: сначала
 подгоняется минимальная модель, затем к ней по очереди добавляются
-нелинейная утечка и модуляция R_s; механизм остаётся, только если он
-заметно улучшает описание по информационному критерию (6.11).
+нелинейная утечка и модуляция R_s. Из вариантов с ошибкой (6.10) не больше
+TARGET_ERROR берётся самый простой; если таких нет — вариант по
+информационному критерию (6.11) (select_variant).
 
 Метод — нелинейные наименьшие квадраты с границами (алгоритм trust region
 reflective, scipy.optimize.least_squares) [BCL99]. Невязка — разность
@@ -14,10 +15,12 @@ arsinh(I/I_ref): для малых токов она близка к относ�
 линейной шкале около нуля, для больших — к разности логарифмов, поэтому
 прямая и обратная ветви весят сопоставимо.
 
-Модели:
-  * эмпирическая (базовый режим): J₀, n формулы (6.3) + R_s, R_sh, I_L, m, I_mod;
+Модели тока — из реестра models (подбираемые параметры тока перехода,
+начальные значения); эквивалентная схема (R_s, R_sh, I_L, m, I_mod) — общая:
+  * эмпирическая (базовый режим): J₀, n формулы (6.3);
+  * двухдиодная (базовый режим): J₀₁, J₀₂ формулы (6.3а);
   * физическая (расширенный режим и «Подгонка»): τ₀^bg, τ^bg (общий множитель
-    τ_n^bg = τ_p^bg) + те же элементы эквивалентной схемы.
+    τ_n^bg = τ_p^bg).
 
 Результат — FitResult: значения с погрешностями, ошибка (6.10), список
 проверенных вариантов модели и пояснения «почему так» (notes).
@@ -27,9 +30,11 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
+from mesa_diode.simulator import models
 from mesa_diode.simulator import physics as ph
 
-EMPIRICAL, PHYSICAL = "empirical", "physical"
+# Модели тока — ключи реестра models (значения Structure.model).
+EMPIRICAL, TWO_DIODE, PHYSICAL = ph.MODEL_EMPIRICAL, ph.MODEL_TWO_DIODE, ph.MODEL_PHYSICAL
 
 # Механизмы, которые подключаются по необходимости: ключ → (название, параметры).
 TERM_LEAK = "leak"
@@ -38,40 +43,38 @@ TERMS = {
     TERM_LEAK: ("нелинейная утечка I_L·|V|^m", ("I_L", "m_leak")),
     TERM_MOD: ("модуляция R_s током I_mod (6.9)", ("I_mod",)),
 }
-CORE = {
-    EMPIRICAL: ("J0_emp", "n_emp", "Rs", "Rsh"),
-    PHYSICAL: ("tau0_bg", "tau_bg", "Rs", "Rsh"),
+# Эквивалентная схема (6.1) — общая для всех моделей тока.
+CIRCUIT_PARAMS = {
+    "Rs": models.FitParam("Rs", True, 1e-3, 1e6, "Ом", "R_s"),
+    "Rsh": models.FitParam("Rsh", True, 1.0, 1e12, "Ом", "R_sh"),
+    "I_L": models.FitParam("I_L", True, 1e-14, 1.0, "А", "I_L"),
+    "m_leak": models.FitParam("m_leak", False, 1.0, 8.0, "—", "m"),
+    "I_mod": models.FitParam("I_mod", True, 1e-7, 1e2, "А", "I_mod"),
 }
+_ALL = {**models.FIT_PARAMS, **CIRCUIT_PARAMS}
+
+
+def core(model):
+    """Всегда подбираемые параметры: ток перехода модели + R_s и R_sh."""
+    return tuple(models.get(model).fit_core) + ("Rs", "Rsh")
+
+
+CORE = {key: core(key) for key in models.MODELS}
 
 # Параметр → (поле Structure, логарифмическая шкала, нижняя, верхняя граница).
-PARAMS = {
-    "J0_emp": ("J0_emp", True, 1e-15, 1e3),
-    # n: 1 — диффузия [Зи, с. 94], 2 — рекомбинация в ОПЗ [СНШ57]; вне [1, 2]
-    # формула (6.3) теряет физический смысл — упор в границу сообщает о другом механизме.
-    "n_emp": ("n_emp", False, 1.0, 2.0),
-    "Rs": ("Rs", True, 1e-3, 1e6),
-    "Rsh": ("Rsh", True, 1.0, 1e12),
-    "I_L": ("I_L", True, 1e-14, 1.0),
-    "m_leak": ("m_leak", False, 1.0, 8.0),
-    "I_mod": ("I_mod", True, 1e-7, 1e2),
-    "tau0_bg": ("tau0_bg", True, 1e-13, 1e-2),
-    "tau_bg": (None, True, 1e-12, 1e-1),      # τ_n^bg = τ_p^bg
-}
-UNITS = {"J0_emp": "А/см²", "n_emp": "—", "Rs": "Ом", "Rsh": "Ом", "I_L": "А", "m_leak": "—",
-         "I_mod": "А", "tau0_bg": "с", "tau_bg": "с"}
-LABELS = {"J0_emp": "J₀", "n_emp": "n", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
-          "I_mod": "I_mod", "tau0_bg": "τ₀^bg", "tau_bg": "τ_n^bg = τ_p^bg"}
+PARAMS = {k: (p.field, p.log, p.lo, p.hi) for k, p in _ALL.items()}
+UNITS = {k: p.unit for k, p in _ALL.items()}
+LABELS = {k: p.label for k, p in _ALL.items()}
 
 # Поле окна (presets) → параметр подгонки; τ_n^bg и τ_p^bg подбираются общим
 # множителем tau_bg, поэтому фиксируются вместе.
-FIELD_TO_PARAM = {"J0_emp": "J0_emp", "n_emp": "n_emp", "Rs": "Rs", "Rsh": "Rsh", "I_L": "I_L",
-                  "m_leak": "m_leak", "I_mod": "I_mod", "tau0_bg": "tau0_bg",
+FIELD_TO_PARAM = {**{p.field: k for k, p in _ALL.items() if p.field},
                   "tau_n_bg": "tau_bg", "tau_p_bg": "tau_bg"}
 
 
 def fittable_fields(model):
     """Поля окна, которые подгонка модели model может изменить."""
-    params = set(CORE[model]) | {p for _name, keys in TERMS.values() for p in keys}
+    params = set(core(model)) | {p for _name, keys in TERMS.values() for p in keys}
     return {f for f, p in FIELD_TO_PARAM.items() if p in params}
 
 
@@ -187,13 +190,7 @@ def _start_values(model, s, V, I):
         rsh = 1.0 / slope if slope > 0 else 1e9
     start = {"Rs": rs, "Rsh": min(max(rsh, 10.0), 1e11), "I_L": 1e-3 * np.max(np.abs(I)),
              "m_leak": 2.0, "I_mod": 10.0 * np.max(np.abs(I))}
-    if model == EMPIRICAL:
-        i0 = np.interp(-0.1, V, I) if V[0] < -0.1 else -1e-3 * np.max(np.abs(I))
-        start["J0_emp"] = max(abs(i0), 1e-12) / s.area
-        start["n_emp"] = 1.5
-    else:
-        start["tau0_bg"] = s.tau0_bg
-        start["tau_bg"] = np.sqrt(s.tau_n_bg * s.tau_p_bg)
+    start.update(models.get(model).start(s, V, I))
     if fwd.sum() < 3:
         start["Rs"] = max(s.Rs, 1.0)
     return start
@@ -321,7 +318,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     target — достаточная ошибка (6.10) для выбора варианта (select_variant).
     locked — поля окна (ключи presets), зафиксированные пользователем: их
     значения берутся из s и не меняются."""
-    base = replace(s, model=ph.MODEL_EMPIRICAL if model == EMPIRICAL else ph.MODEL_PHYSICAL)
+    base = replace(s, model=models.get(model).key)
     V, I = prepare_data(V, I)
     if V.size < 8:
         raise ValueError("для подгонки нужно не меньше 8 точек ВАХ")
@@ -338,7 +335,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     for terms in _variants(base, lock):
         if progress:
             progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
-        used = list(CORE[model]) + [p for t in terms for p in TERMS[t][1]]
+        used = list(core(model)) + [p for t in terms for p in TERMS[t][1]]
         keys = [k for k in used if k not in lock]
         fixed = {k: v for k, v in off.items() if k not in used}
         s_run = apply(base, fixed)
@@ -379,7 +376,8 @@ def _selection_notes(result):
     target = 100 * result.target
     chosen = next(c for c in result.candidates if c.accepted)
     if result.target and chosen.error <= result.target:
-        better = [c for c in result.candidates if c.error < chosen.error and len(c.terms) > len(chosen.terms)]
+        better = [c for c in result.candidates
+                  if c.error < 0.8 * chosen.error and len(c.terms) > len(chosen.terms)]
         text = (f"Выбор: самый простой вариант с ошибкой не больше {target:.0f} % — физичность важнее "
                 "долей процента.")
         if better:
@@ -440,6 +438,31 @@ def _consistency_notes(result, s):
                 notes.append(f"J₀ = {p['J0_emp']:.3g} А/см² в {1 / ratio:.3g} раз меньше диффузионного J_s "
                              f"= {js:.3g} А/см² структуры (4.3): проверьте площадь D, T и концентрации — "
                              "меньше диффузионного предела ток идеального диода не бывает.")
+    if result.model == TWO_DIODE and "J02_2d" in p:
+        # (5.4) при n₂ = 2: J_gr = q·n_i·W/(2τ₀) → τ₀ ≈ q·n_i·W(0)/(2·J₀₂)
+        W0 = float(ph.depletion_width(s, 0.0))
+        tau0 = ph.Q * s.ni * W0 / (2.0 * p["J02_2d"])
+        notes.append(f"J₀₂ = {p['J02_2d']:.3g} А/см² по (5.4) соответствует τ₀ ≈ q·n_i·W/(2J₀₂) = {tau0:.3g} с "
+                     f"(W(0) = {W0 * 1e4:.3g} мкм при текущих концентрациях).")
+        phys = replace(s, model=PHYSICAL)
+        try:
+            js = float(ph.saturation_current_density(phys, 0.0))
+        except (ValueError, ZeroDivisionError, FloatingPointError):
+            js = float("nan")
+        if np.isfinite(js) and js > 0:
+            ratio = p["J01_2d"] / js
+            text = (f"J₀₁ = {p['J01_2d']:.3g} А/см² против диффузионного J_s = {js:.3g} А/см² структуры "
+                    f"(4.3): отношение {ratio:.3g}.")
+            if ratio > 10:
+                text += " J₀₁ больше: диффузионные длины короче заданных или ток n = 1 идёт не через объём."
+            elif ratio < 0.1:
+                text += (" J₀₁ меньше: концентрации сторон или T в полях не соответствуют образцу "
+                         "(J_s ∝ n_i²/N слабой стороны) либо времена жизни длиннее заданных.")
+            notes.append(text)
+        V_mid = 0.2
+        i1 = p["J01_2d"] * np.expm1(V_mid / s.Vt)
+        i2 = p["J02_2d"] * np.expm1(V_mid / (2 * s.Vt))
+        notes.append(f"При V_d = {V_mid:g} В доля тока ОПЗ (n = 2) — {100 * i2 / (i1 + i2):.0f} %.")
     Rs = p.get("Rs")
     if Rs is not None and np.isfinite(Rs):
         try:

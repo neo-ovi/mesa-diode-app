@@ -1,257 +1,878 @@
 # -*- coding: utf-8 -*-
-"""Физическое ядро симулятора мезоструктуры Ge/Si.
+"""Физическое ядро симулятора мезадиода (Ge, гомопереход).
 
-Прямая модель: параметры структуры задаются пользователем (не из измерений),
-и по ним рассчитываются ВАХ и ВФХ. Это отличает симулятор от остальной части
-пакета `mesa_diode`, которая, наоборот, подгоняет параметры под уже измеренную
-ВАХ образца (см. `mesa_diode.fit`).
+Номера формул (раздел.номер) совпадают с вкладкой «Модель» окна
+«Формулы и параметры». Источники указаны библиографически в docstring
+каждой функции; коды источников — см. реестр в simulator/formulas.py.
 
-Без изменений перенесено из первой версии симулятора (mesa_simulator.py).
+Единицы в расчёте: см, см⁻³, с, В, А, Ф, К; E_g — эВ. Знаки: V > 0 —
+прямое смещение, I > 0 — прямой ток [Ш49, с. 460].
 """
 
+from dataclasses import dataclass, replace
+from functools import cached_property
+
 import numpy as np
+from scipy.integrate import quad
+from scipy.optimize import brentq, minimize_scalar
+from scipy.special import expit
 
-Q = 1.602176634e-19      # Кл, заряд электрона
-K = 1.380649e-23         # Дж/К, постоянная Больцмана
-EPS0 = 8.8541878128e-14  # Ф/см, электрическая постоянная
+from mesa_diode.simulator.materials import EPS0, GE, K_B, Q
 
-# Материальные константы (фиксированы; не выводятся как отдельные поля ввода,
-# т.к. запрошен МИНИМАЛЬНЫЙ набор геометрических/электрофизических параметров
-# мезы, а не полная база данных материалов).
-# Если нужно поменять материал/справочные значения — меняйте только здесь,
-# формулы ниже их не дублируют.
-EPS_R_SI = 11.7
-EPS_R_GE = 16.2
-EG_SI0 = 1.12    # эВ, 300 К
-EG_GE0 = 0.66    # эВ, 300 К
-NI_SI_300 = 1.5e10    # см^-3
-NI_GE_300 = 2.4e13    # см^-3
+SQRT_PI = np.sqrt(np.pi)
 
-# Эмпирическая модель подвижности Кофи-Томаса: mu(N) = mu_min + (mu_max-mu_min)/(1+(N/Nref)^alpha)
-MU_SI_N = dict(mu_max=1417.0, mu_min=60.0, Nref=9.68e16, alpha=0.68)
-MU_GE_P = dict(mu_max=1900.0, mu_min=50.0, Nref=1.0e17, alpha=0.6)
-
-TAU_MINORITY = 1e-7   # с, время жизни неосновных носителей (диффузионный ток)
-TAU0_SCR = 1e-8       # с, время жизни в ОПЗ (рекомбинационный ток)
-
-# Характерные (табличные) плотности тока насыщения p-n перехода при 300 К —
-# только для справочного графика "идеальный диод по уравнению Шокли"
-# (см. shockley_current_density ниже). НЕ используются в двухдиодной
-# геометрической модели мезы выше (там ток насыщения p.J0 считается из
-# реальных параметров структуры). Порядок величины: у Ge собственная
-# концентрация носителей на несколько порядков больше, чем у Si (см.
-# NI_GE_300 против NI_SI_300), поэтому и характерный ток насыщения на
-# несколько порядков выше. Значения ориентировочные (типичный порядок
-# величины из учебной литературы) — в интерфейсе их можно заменить своими.
-MATERIAL_J0_A_CM2 = {
-    "Si": 1e-12,
-    "Ge": 1e-6,
-}
+# Пороги вырождения по η (2.7): «несколько kT» [Зи, с. 22] в численной трактовке ТЗ.
+ETA_ONSET = -3.0
+ETA_DEGENERATE = 0.0
 
 
-def mobility(N, prm):
-    """Формула Кофи-Томаса — см. simulator/formulas.py, раздел 7."""
-    return prm['mu_min'] + (prm['mu_max'] - prm['mu_min']) / (
-        1.0 + (N / prm['Nref']) ** prm['alpha'])
+def thermal_voltage(T):
+    """V_t = kT/q, В."""
+    return K_B * T / Q
 
 
-def ni_of_T(ni_300, Eg_eV, T):
-    """Температурная зависимость собственной концентрации носителей."""
-    k_eV = 8.617333e-5
-    return ni_300 * (T / 300.0) ** 1.5 * np.exp(
-        -Eg_eV / (2 * k_eV) * (1.0 / T - 1.0 / 300.0))
+# ------------------------------------------------------------ §2. Материал --
+
+def band_gap(T, mat=GE):
+    """(2.1) E_g(T) = E_g(0) − αT²/(T + β), эВ — [Зи, с. 20, табл. на рис. 8]."""
+    return mat.Eg0_eV - mat.alpha_eV_K * T ** 2 / (T + mat.beta_K)
 
 
-class MesaParams:
-    """Собирает первичные параметры и рассчитывает производные величины.
-    Порядок вычислений соответствует разделам 1-6 окна «Формулы и параметры»."""
-
-    def __init__(self, D_um, d_um, h_um, ND_si, NA_ge, T_K, Rs_ohm, Rsh_ohm, n2):
-        self.D_um, self.d_um, self.h_um = D_um, d_um, h_um
-        self.ND, self.NA = ND_si, NA_ge
-        self.T = T_K
-        self.Rs, self.Rsh, self.n2 = Rs_ohm, Rsh_ohm, n2
-
-        D_cm = D_um * 1e-4
-        self.A = np.pi * (D_cm / 2.0) ** 2          # см^2, площадь мезы (раздел 1)
-
-        self.Vt = K * self.T / Q                     # тепловой потенциал, В
-
-        self.ni_si = ni_of_T(NI_SI_300, EG_SI0, self.T)
-        self.ni_ge = ni_of_T(NI_GE_300, EG_GE0, self.T)
-        self.ni_eff = np.sqrt(self.ni_si * self.ni_ge)
-
-        self.mu_n_si = mobility(self.ND, MU_SI_N)
-        self.mu_p_ge = mobility(self.NA, MU_GE_P)
-        self.Dn_si = self.Vt * self.mu_n_si
-        self.Dp_ge = self.Vt * self.mu_p_ge
-        self.Ln_si = np.sqrt(self.Dn_si * TAU_MINORITY)
-        self.Lp_ge = np.sqrt(self.Dp_ge * TAU_MINORITY)
-
-        self.eps = EPS0 * (EPS_R_SI + EPS_R_GE) / 2.0
-        self.Neff = 1.0 / (1.0 / self.ND + 1.0 / self.NA)
-        self.Vbi = self.Vt * np.log((self.ND * self.NA) / (self.ni_eff ** 2))
-
-        pn0 = self.ni_ge ** 2 / self.NA
-        np0 = self.ni_si ** 2 / self.ND
-        self.J0 = Q * (self.Dp_ge * pn0 / self.Lp_ge + self.Dn_si * np0 / self.Ln_si)  # раздел 2
+def effective_dos(T, mat=GE):
+    """(2.2) N_C = N_C0·T^{3/2}, N_V = N_V0·T^{3/2}, см⁻³ — [Ioffe-Ge-b]."""
+    t32 = T ** 1.5
+    return mat.Nc0 * t32, mat.Nv0 * t32
 
 
-def depletion_width(V, p):
-    """Ширина ОПЗ, см. раздел 5."""
-    dV = np.maximum(p.Vbi - V, 1e-4)
-    return np.sqrt(2 * p.eps * dV / (Q * p.Neff))
+def intrinsic_concentration(T, mat=GE):
+    """(2.3) n_i = √(N_C·N_V)·exp(−E_g/2kT), см⁻³ — [Зи, с. 24, ур. (19), (19а)]."""
+    Nc, Nv = effective_dos(T, mat)
+    return np.sqrt(Nc * Nv) * np.exp(-band_gap(T, mat) / (2.0 * thermal_voltage(T)))
 
 
-def capacitance(V, p):
-    """Барьерная ёмкость C(V), см. раздел 6. Возвращает NaN вблизи V=Vbi
-    (сингулярность резкого перехода) и правее — модель там не определена."""
-    Vlim = 0.95 * p.Vbi
-    Vc = np.minimum(V, Vlim)
-    C = p.eps * p.A / depletion_width(Vc, p)
-    return np.where(V < Vlim, C, np.nan)
+def equilibrium_carriers(N, ni):
+    """(2.4) Равновесные концентрации слоя с легированием N (полная ионизация):
+    основные M = N/2 + √(N²/4 + n_i²), неосновные m = n_i²/M.
+    Из np = n_i² [Зи, с. 24, ур. (19)] и электронейтральности.
+    Возвращает (M, m)."""
+    majority = N / 2.0 + np.sqrt(N * N / 4.0 + ni * ni)
+    return majority, ni * ni / majority
 
 
-def estimate_grading_m(V, C, Vbi):
+def diffusion_coefficient(mu, T):
+    """(2.5) D = (kT/q)·μ, см²/с — [Зи, с. 36, ур. (44)]."""
+    return thermal_voltage(T) * mu
+
+
+def diffusion_length(D, tau):
+    """(2.6) L = √(Dτ), см — [Зи, с. 94, ур. (41)]."""
+    return np.sqrt(D * tau)
+
+
+def fermi_integral_half(eta):
+    """F_{1/2}(η) = ∫₀^∞ x^{1/2} dx / (1 + e^{x−η}) — [Зи, с. 22, ур. (11); с. 23, рис. 10]."""
+    upper = max(eta, 0.0) + 60.0
+    # epsabs=0: при сильно отрицательном η значения ~e^η малы, абсолютный
+    # допуск quad по умолчанию дал бы относительную ошибку ~10⁻⁵.
+    value, _ = quad(lambda x: np.sqrt(x) * expit(eta - x), 0.0, upper,
+                    limit=200, epsabs=0.0, epsrel=1e-10)
+    return value
+
+
+def carriers_from_eta(eta, N_band):
+    """(2.7) n = N_C·(2/√π)·F_{1/2}(η) — [Зи, с. 22, ур. (11), (14)]."""
+    return N_band * 2.0 / SQRT_PI * fermi_integral_half(eta)
+
+
+def reduced_fermi_level(n, N_band):
+    """(2.7) η по концентрации основных носителей: обращение
+    n = N·(2/√π)·F_{1/2}(η) (quad + brentq). Для электронов η = (E_F − E_C)/kT,
+    для дырок η = (E_V − E_F)/kT."""
+    target = n / N_band
+    lower = np.log(target)  # статистика Больцмана завышает n, поэтому η ≥ ln(n/N)
+    upper = max(lower, 0.0) + 2.0 + (0.75 * SQRT_PI * target) ** (2.0 / 3.0)
+    return brentq(lambda eta: 2.0 / SQRT_PI * fermi_integral_half(eta) - target,
+                  lower, upper, xtol=1e-10)
+
+
+def boltzmann_ratio(eta):
+    """(2.7) Ошибка Больцмана: (2/√π)·F_{1/2}(η)·e^{−η} — отношение точной
+    концентрации к больцмановской при том же η (1 — нет ошибки)."""
+    return 2.0 / SQRT_PI * fermi_integral_half(eta) * np.exp(-eta)
+
+
+def degeneracy_status(eta):
+    """Статус вырождения по η: ≥ 0 — вырожден, ≥ −3 — начало вырождения."""
+    if eta >= ETA_DEGENERATE:
+        return "вырожден"
+    if eta >= ETA_ONSET:
+        return "начало вырождения"
+    return "невырожден"
+
+
+def degeneracy_thresholds(T, mat=GE, etas=(-3.0, -2.0, 0.0)):
+    """Концентрации электронов и дырок при заданных η (таблица порогов (2.7))."""
+    Nc, Nv = effective_dos(T, mat)
+    return {
+        "electrons": {eta: carriers_from_eta(eta, Nc) for eta in etas},
+        "holes": {eta: carriers_from_eta(eta, Nv) for eta in etas},
+    }
+
+
+def resistivity(NA, T, mat=GE):
+    """ρ = 1/[q(μ_n·n₀ + μ_p·p₀)], Ом·см — [Зи, с. 36, ур. (47)];
+    n₀, p₀ по (2.4), μ — чистого материала (§4)."""
+    p0, n0 = equilibrium_carriers(NA, intrinsic_concentration(T, mat))
+    return 1.0 / (Q * (mat.mu_n_max * n0 + mat.mu_p_max * p0))
+
+
+def acceptor_from_resistivity(rho, T, mat=GE):
+    """(2.8) N_A подложки по ρ_sub: решение ρ(N_A) совместно с (2.4).
+
+    ρ(N_A) немонотонна (максимум около собственной концентрации): при
+    ρ(0) < ρ ≤ ρ_max решений два — берётся большее, с предупреждением.
+    Возвращает (N_A, [предупреждения]); при ρ > ρ_max — (nan, [...]).
     """
-    Оценка коэффициента градиента перехода m по наклону зависимости
-    ln(C) от ln(Vbi - V) (см. раздел 6 окна формул):
-        C ~ (Vbi - V)^(-1/(m+2))  =>  наклон = -1/(m+2)
-    m -> 0 : резкий (ступенчатый) переход;  m -> 1 : линейно-плавный переход.
-    Используются только точки при V < -0.05 В (подальше от Vbi, устойчивее оценка).
-    Возвращает (m, наклон) или (None, None), если точек недостаточно.
+    warnings = []
+    peak = minimize_scalar(lambda lg: -resistivity(10.0 ** lg, T, mat),
+                           bounds=(8.0, 18.0), method="bounded", options={"xatol": 1e-6})
+    lg_peak = peak.x
+    rho_max = resistivity(10.0 ** lg_peak, T, mat)
+    rho_zero = resistivity(0.0, T, mat)
+    if rho > rho_max:
+        return float("nan"), [
+            f"ρ_{{sub}} = {rho:g} Ом·см больше максимально возможного для {mat.name} "
+            f"({rho_max:.1f} Ом·см при T = {T:g} К): решения нет."]
+    if rho > rho_zero:
+        warnings.append(
+            f"ρ_{{sub}} = {rho:g} Ом·см > ρ(0) = {rho_zero:.1f} Ом·см: два решения "
+            "(2.8), взято большее N_A.")
+    lg = brentq(lambda x: resistivity(10.0 ** x, T, mat) - rho, lg_peak, 22.0, xtol=1e-12)
+    return 10.0 ** lg, warnings
+
+
+# ------------------------------------------ §5. Структура и два сценария --
+
+SCENARIO_A = "A"   # i-слой p: переход n⁺/i на глубине d_n
+SCENARIO_B = "B"   # i-слой n (по умолчанию): переход i/подложка на дне мезы
+SCENARIOS = (SCENARIO_A, SCENARIO_B)
+
+SINK, REFLECT, LONG = "sink", "reflect", "long"
+BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "длинная база"}
+
+VBI_DEGENERATE = "degenerate"   # (3.1а), используется в расчёте всегда
+VBI_BOLTZMANN = "boltzmann"     # (3.1), для сравнения и эталонов §9
+
+
+@dataclass(frozen=True)
+class Side:
+    """Нейтральная область одной стороны перехода."""
+
+    kind: str            # "n" или "p"
+    layer: str           # "n+", "i" или "sub"
+    N: float             # концентрация ионизованной примеси, см⁻³
+    thickness: float     # толщина слоя, см
+    mu_minority: float   # подвижность неосновных носителей, см²/(В·с)
+    tau_bg: float        # фоновое время жизни неосновных, с
+    sigma_R: float       # рекомбинационная эффективность дислокации, см²/с
+    boundary: str        # граничное условие на дальней границе
+
+
+@dataclass(frozen=True)
+class Structure:
+    """Параметры структуры (§5.3) в единицах расчёта: см, см⁻³, с, Ом, А, К.
+
+    Сценарий A: i-слой p-типа, переход n⁺/i (z_j = d_n).
+    Сценарий B: i-слой n-типа, переход i/подложка (z_j = d_epi).
+    Граничные условия дальних границ: bc_A_n (верхний контакт),
+    bc_A_p (граница i/подложка), bc_B_n (граница n/n⁺), bc_B_p (тыльный контакт).
     """
-    mask = np.isfinite(C) & (C > 0) & (V < -0.05) & ((Vbi - V) > 1e-6)
-    if np.sum(mask) < 5:
+
+    D: float
+    d_epi: float
+    h: float
+    d_n: float
+    d_sub: float
+    ND_plus: float
+    N_i: float
+    rho_sub: float
+    T: float = 300.0
+    scenario: str = SCENARIO_B
+    mu_n: float = GE.mu_n_max        # электроны — неосновные в p-области
+    mu_p_i: float = GE.mu_p_max      # дырки в i-слое
+    mu_p_nplus: float = GE.mu_p_max  # дырки в n⁺ (значение задаёт набор образца)
+    tau_n_bg: float = 1e-6
+    tau_p_bg: float = 1e-6
+    tau0_bg: float = 1e-7
+    N_dis: float = 0.0
+    sigma_R_epi: float = 3.5e-3      # i-слой и n⁺
+    sigma_R_sub: float = 5.5e-4      # подложка
+    n2: float = 2.0
+    Rs: float = 0.0
+    Rsh: float = float("inf")
+    I_L: float = 0.0
+    m_leak: float = 3.0
+    bc_A_n: str = SINK
+    bc_A_p: str = SINK
+    bc_B_n: str = REFLECT
+    bc_B_p: str = SINK
+    sns_refinement: bool = False
+    edge_area: bool = False
+    vbi_method: str = VBI_DEGENERATE
+    material: object = GE
+
+    def with_scenario(self, scenario):
+        return replace(self, scenario=scenario)
+
+    # --- материал при температуре T ---
+    @cached_property
+    def Vt(self):
+        return thermal_voltage(self.T)
+
+    @cached_property
+    def ni(self):
+        return intrinsic_concentration(self.T, self.material)
+
+    @cached_property
+    def eps(self):
+        """ε = ε_r·ε₀, Ф/см [Ioffe-SiGe]; без усреднения по материалам."""
+        return self.material.eps_r * EPS0
+
+    @cached_property
+    def area(self):
+        """(1.1) A = πD²/4, см²."""
+        return np.pi * self.D ** 2 / 4.0
+
+    @cached_property
+    def d_i(self):
+        """Толщина нелегированного слоя d_i = d_epi − d_n, см."""
+        return self.d_epi - self.d_n
+
+    @cached_property
+    def substrate(self):
+        """N_A подложки по ρ_sub (2.8): (N_A, [предупреждения])."""
+        return acceptor_from_resistivity(self.rho_sub, self.T, self.material)
+
+    # --- стороны перехода по сценарию (§5.2) ---
+    @cached_property
+    def n_side(self):
+        if self.scenario == SCENARIO_A:
+            return Side("n", "n+", self.ND_plus, self.d_n, self.mu_p_nplus,
+                        self.tau_p_bg, self.sigma_R_epi, self.bc_A_n)
+        return Side("n", "i", self.N_i, self.d_i, self.mu_p_i,
+                    self.tau_p_bg, self.sigma_R_epi, self.bc_B_n)
+
+    @cached_property
+    def p_side(self):
+        if self.scenario == SCENARIO_A:
+            return Side("p", "i", self.N_i, self.d_i, self.mu_n,
+                        self.tau_n_bg, self.sigma_R_epi, self.bc_A_p)
+        return Side("p", "sub", self.substrate[0], self.d_sub, self.mu_n,
+                    self.tau_n_bg, self.sigma_R_sub, self.bc_B_p)
+
+    @cached_property
+    def z_j(self):
+        """Глубина p-n перехода от поверхности мезы, см."""
+        return self.d_n if self.scenario == SCENARIO_A else self.d_epi
+
+    @cached_property
+    def majority(self):
+        """Равновесные основные носители сторон (2.4): (n_n0, p_p0)."""
+        return (equilibrium_carriers(self.n_side.N, self.ni)[0],
+                equilibrium_carriers(self.p_side.N, self.ni)[0])
+
+    @cached_property
+    def minority(self):
+        """Равновесные неосновные носители (2.4): (p_n0, n_p0)."""
+        return (equilibrium_carriers(self.n_side.N, self.ni)[1],
+                equilibrium_carriers(self.p_side.N, self.ni)[1])
+
+    @cached_property
+    def eta(self):
+        """(2.7) η основных носителей: (η_n n-стороны, η_p p-стороны)."""
+        Nc, Nv = effective_dos(self.T, self.material)
+        n_n0, p_p0 = self.majority
+        return reduced_fermi_level(n_n0, Nc), reduced_fermi_level(p_p0, Nv)
+
+    @cached_property
+    def Vbi(self):
+        return built_in_potential(self, self.vbi_method)
+
+    @cached_property
+    def N_eff(self):
+        """N_eff = N_A·N_D/(N_A + N_D), см⁻³ (3.5)."""
+        NA, ND = self.p_side.N, self.n_side.N
+        return NA * ND / (NA + ND)
+
+
+# ------------------------------------------------- §3. Электростатика --
+
+def built_in_potential(s, method=VBI_DEGENERATE):
+    """Встроенный потенциал, В.
+
+    (3.1)  V_bi = (kT/q)·ln(n_n0·p_p0/n_i²) — [Зи, с. 82, ур. (7), (7а)], n_n0, p_p0 по (2.4).
+    (3.1а) qV_bi = E_g + kT(η_n + η_p) — [Зи, с. 82, ур. (7), первое равенство],
+           η по (2.7); при η < −3 совпадает с (3.1).
+    """
+    if method == VBI_BOLTZMANN:
+        n_n0, p_p0 = s.majority
+        return s.Vt * np.log(n_n0 * p_p0 / s.ni ** 2)
+    eta_n, eta_p = s.eta
+    return band_gap(s.T, s.material) + s.Vt * (eta_n + eta_p)
+
+
+def _depletion_argument(s, V):
+    """V_bi − V − 2kT/q, ограниченное снизу kT/q (условие применимости §3)."""
+    return np.maximum(s.Vbi - np.asarray(V, dtype=float) - 2.0 * s.Vt, s.Vt)
+
+
+def depletion_width(s, V):
+    """(3.2) W(V) = √[(2ε/q)·(N_A + N_D)/(N_A·N_D)·(V_bi − V − 2kT/q)], см —
+    [Зи, с. 84, ур. (15), (16); с. 86, ур. (18)]; N — ионизованная примесь."""
+    NA, ND = s.p_side.N, s.n_side.N
+    return np.sqrt(2.0 * s.eps / Q * (NA + ND) / (NA * ND) * _depletion_argument(s, V))
+
+
+def depletion_edges(s, V):
+    """(3.2) x_p = W·N_D/(N_A + N_D), x_n = W·N_A/(N_A + N_D) — [Зи, с. 82, ур. (9)].
+    Возвращает (x_n, x_p), см."""
+    NA, ND = s.p_side.N, s.n_side.N
+    W = depletion_width(s, V)
+    return W * NA / (NA + ND), W * ND / (NA + ND)
+
+
+def capacitance(s, V):
+    """(3.4) C = εA/W, Ф — [Зи, с. 86, ур. (18)]. NaN при V > V_bi − 3kT/q."""
+    V = np.asarray(V, dtype=float)
+    C = s.eps * s.area / depletion_width(s, V)
+    return np.where(V > s.Vbi - 3.0 * s.Vt, np.nan, C)
+
+
+def inv_c2(s, V):
+    """(3.5) 1/C² = 2(V_bi − 2kT/q − V)/(qεN_eff·A²), Ф⁻² —
+    [Зи, с. 87, ур. (18а), (18б); с. 88, ур. (18в)]."""
+    return 1.0 / capacitance(s, V) ** 2
+
+
+def c2_cutoff(s):
+    """Отсечка 1/C² по оси V: V_bi − 2kT/q, В (3.5)."""
+    return s.Vbi - 2.0 * s.Vt
+
+
+def fit_inv_c2(V, C, area, eps, window=None):
+    """Прямая 1/C² = a + b·V на участке window = (V_min, V_max).
+
+    Из наклона по (3.5): N = −2/(q·ε·A²·b); отсечка V₀ = −a/b.
+    Возвращает (N, V₀) или (nan, nan), если точек меньше трёх.
+    """
+    V = np.asarray(V, dtype=float)
+    C = np.asarray(C, dtype=float)
+    mask = np.isfinite(C) & (C > 0)
+    if window is not None:
+        mask &= (V >= window[0]) & (V <= window[1])
+    if mask.sum() < 3:
+        return float("nan"), float("nan")
+    b, a = np.polyfit(V[mask], 1.0 / C[mask] ** 2, 1)
+    return -2.0 / (Q * eps * area ** 2 * b), -a / b
+
+
+def estimate_grading_m(V, C, vbi_prime):
+    """Показатель резкости по наклону ln C от ln(V_bi′ − V), V_bi′ = V_bi − 2kT/q.
+
+    C ∝ (V_bi′ − V)^{−1/2} — резкий переход; C ∝ (V_bi − V)^{−1/3} —
+    линейный [Зи, с. 89, ур. (23)]; общий показатель −1/(m + 2) — интерполяция.
+    Возвращает (m, наклон) или (None, None) при нехватке точек (< 5, V < −0.05 В).
+    """
+    V = np.asarray(V, dtype=float)
+    C = np.asarray(C, dtype=float)
+    mask = np.isfinite(C) & (C > 0) & (V < -0.05) & ((vbi_prime - V) > 1e-6)
+    if mask.sum() < 5:
         return None, None
-    x = np.log(Vbi - V[mask])
-    y = np.log(C[mask])
-    slope, _intercept = np.polyfit(x, y, 1)
+    slope, _ = np.polyfit(np.log(vbi_prime - V[mask]), np.log(C[mask]), 1)
     if slope >= 0:
         return None, slope
-    m = (-1.0 / slope) - 2.0
-    return m, slope
+    return -1.0 / slope - 2.0, slope
 
 
-def _Idiode(Vd, p, W0):
-    Jrec0 = Q * p.ni_eff * W0 / (2 * TAU0_SCR)
-    x1 = np.clip(Vd / p.Vt, -50, 80)
-    x2 = np.clip(Vd / (p.n2 * p.Vt), -50, 80)
-    return p.A * (p.J0 * np.expm1(x1) + Jrec0 * np.expm1(x2))
+# ------------------------------------------- §1. Геометрия и изоляция --
+
+def edge_area(s, V):
+    """(1.3) Добавочная площадь ОПЗ ΔA ≈ πD·max(0, x_p(V) − (h − z_j)), см² —
+    оценка ТЗ (геометрическая). Для сценария B (z_j = d_epi) это
+    πD·max(0, x_p − (h − d_epi)); в сценарии A ОПЗ, как правило, внутри мезы."""
+    _, xp = depletion_edges(s, V)
+    return np.pi * s.D * np.maximum(0.0, xp - (s.h - s.z_j))
 
 
-def _dIdiode(Vd, p, W0):
-    Jrec0 = Q * p.ni_eff * W0 / (2 * TAU0_SCR)
-    x1 = np.clip(Vd / p.Vt, -50, 80)
-    x2 = np.clip(Vd / (p.n2 * p.Vt), -50, 80)
-    return p.A * (p.J0 * np.exp(x1) / p.Vt + Jrec0 * np.exp(x2) / (p.n2 * p.Vt))
+def side_wall_area(s):
+    """Площадь боковой стенки S_side = πDh, см² (справочно, для бэклога Б-3)."""
+    return np.pi * s.D * s.h
 
 
-def solve_iv(V_array, p):
-    """Численное решение неявного уравнения (раздел 4):
-       I = I_диод(V - I*Rs) + (V - I*Rs)/Rsh   (метод Ньютона по каждой точке V)."""
-    W0 = depletion_width(0.0, p)
-    I_out = np.zeros_like(V_array, dtype=float)
-    I_guess = 0.0
-    for i, V in enumerate(V_array):
-        for _ in range(60):
-            Vd = V - I_guess * p.Rs
-            f = I_guess - _Idiode(Vd, p, W0) - Vd / p.Rsh
-            dVd_dI = -p.Rs
-            df = 1.0 - _dIdiode(Vd, p, W0) * dVd_dI - dVd_dI / p.Rsh
-            if abs(df) < 1e-30:
-                break
-            I_new = I_guess - f / df
-            if abs(I_new - I_guess) > 1.0:
-                I_new = I_guess + np.sign(I_new - I_guess) * 1.0
-            if abs(I_new - I_guess) < 1e-16 * max(1.0, abs(I_new)):
-                I_guess = I_new
-                break
-            I_guess = I_new
-        I_out[i] = I_guess
-    return I_out
+# ------------------------------------------ §5А. Дислокации и время жизни --
+
+def dislocation_lifetime(sigma_R, N_dis):
+    """τ_dis = 1/(σ_R·N_dis), с — из [KKA56, с. 1289, ур. (3)]: λ = σ_R·N_D·ΔP."""
+    return float("inf") if N_dis <= 0 else 1.0 / (sigma_R * N_dis)
 
 
-def auto_scale(array, base_unit):
-    """Подбор удобной приставки (базовая -> м -> мк -> н -> п) для отображения.
-    base_unit — строка базовой единицы ('А' для тока, 'Ф' для ёмкости)."""
-    finite = array[np.isfinite(array)]
-    maxval = np.max(np.abs(finite)) if finite.size else 0.0
-    for factor, prefix in ((1, ""), (1e3, "м"), (1e6, "мк"),
-                            (1e9, "н"), (1e12, "п")):
-        if maxval * factor >= 1.0 or prefix == "п":
-            return factor, prefix + base_unit
-    return 1e12, "п" + base_unit
+def minority_lifetime(side, N_dis):
+    """(5.9) 1/τ = 1/τ^bg + σ_R·N_dis: каналы рекомбинации складываются;
+    второе слагаемое — [KKA56, ур. (3)]."""
+    return 1.0 / (1.0 / side.tau_bg + side.sigma_R * N_dis)
 
 
-def shockley_current_density(V, J0_A_cm2, T_K=300.0, n=1.0):
-    """Идеальное уравнение Шокли для плотности тока: J = J0*(exp(qV/(n*kT)) - 1).
-
-    Не связано с двухдиодной геометрической моделью мезы выше — это
-    справочная кривая по характерной плотности тока насыщения материала
-    (см. MATERIAL_J0_A_CM2), чтобы сравнить ВАХ мезы с «типичным» переходом
-    Si или Ge.
-    """
-    Vt = K * T_K / Q
-    x = np.clip(np.asarray(V, dtype=float) / (n * Vt), -50, 80)
-    return J0_A_cm2 * np.expm1(x)
+def scr_sigma_R(s):
+    """σ_R слоя, в котором лежит бо́льшая часть ОПЗ (x_p > x_n ⇔ N_D > N_A)."""
+    return s.p_side.sigma_R if s.n_side.N > s.p_side.N else s.n_side.sigma_R
 
 
-def current_density_from_area(current_A, area_cm2):
-    """Плотность тока J = I / S по геометрической площади мезы S = area_cm2."""
-    return np.asarray(current_A, dtype=float) / area_cm2
+def scr_lifetime(s):
+    """(5.10) 1/τ₀ = 1/τ₀^bg + σ_R·N_dis — допущение модели: перенос
+    [KKA56, ур. (3)] (объёмное время жизни) на ОПЗ."""
+    return 1.0 / (1.0 / s.tau0_bg + scr_sigma_R(s) * s.N_dis)
 
 
-def robust_value_limits(primary_arrays, fallback_array, margin_fraction=0.2):
-    """Границы оси Y по «содержательным» данным, а не по хвосту модели.
+# --------------------------------------------------- §4. Диффузионный ток --
 
-    Экспоненциальные модели (Шокли, двухдиодная) при широком диапазоне
-    напряжений могут давать физически нереалистичные значения на краях
-    (реальный диод либо ограничен Rs, либо электрически пробивается задолго
-    до таких V) — если строить ось Y по ним, содержательная часть графика
-    (там, где есть эксперимент) сжимается в незаметную линию у нуля.
+W_MIN = 1e-7      # см (1 нм): минимальная толщина нейтральной базы при смыкании
+U_SMALL = 1e-6    # при u < 10⁻⁶: coth u = 1/u, tanh u = u
+U_LARGE = 20.0    # при u > 20: f = 1
 
-    Если ``primary_arrays`` непусты (обычно — экспериментальные значения),
-    границы считаются по ним с запасом margin_fraction, а модельная кривая
-    может выходить за пределы видимой области — это ожидаемо. Если
-    ``primary_arrays`` пуст (данных не загружено), используются границы
-    ``fallback_array`` (обычно — сама модельная кривая) целиком.
-    """
-    values = [np.asarray(a) for a in primary_arrays if np.asarray(a).size]
-    if values:
-        combined = np.concatenate(values)
-        vmin, vmax = float(np.min(combined)), float(np.max(combined))
+
+def boundary_factor(u, boundary):
+    """f(w/L) в (4.3): 1 — длинная база [Зи, ур. (40)]; coth — «сток»,
+    Δn(w) = 0 [Ш49, с. 470, ур. (5.5)]; tanh — «отражение», dΔn/dx(w) = 0
+    [Ш49, с. 470, ур. (5.6) при p₁ = p₂]."""
+    u = np.asarray(u, dtype=float)
+    if boundary == LONG:
+        return np.ones_like(u)
+    small = u < U_SMALL
+    safe = np.where(small, U_SMALL, u)
+    if boundary == SINK:
+        f = np.where(small, 1.0 / np.maximum(u, 1e-300), 1.0 / np.tanh(safe))
+    elif boundary == REFLECT:
+        f = np.where(small, u, np.tanh(safe))
     else:
-        fb = np.asarray(fallback_array)
-        finite = fb[np.isfinite(fb)]
-        vmin, vmax = (float(np.min(finite)), float(np.max(finite))) if finite.size else (0.0, 1.0)
-
-    span = vmax - vmin
-    margin = span * margin_fraction if span > 0 else max(abs(vmin), abs(vmax), 1.0) * margin_fraction
-    return vmin - margin, vmax + margin
+        raise ValueError(f"неизвестное граничное условие: {boundary!r}")
+    return np.where(u > U_LARGE, 1.0, f)
 
 
-def adaptive_voltage_range(voltage_arrays, default_min=-1.0, default_max=0.6,
-                            margin_fraction=0.05):
-    """Диапазон напряжений для расчёта модели: покрывает значения по
-    умолчанию и все переданные экспериментальные массивы (с запасом по
-    краям), чтобы модельная кривая не обрывалась раньше точек эксперимента.
-    """
-    vmin, vmax = default_min, default_max
-    for arr in voltage_arrays:
-        arr = np.asarray(arr)
-        if arr.size:
-            vmin = min(vmin, float(np.min(arr)))
-            vmax = max(vmax, float(np.max(arr)))
-
-    span = vmax - vmin
-    margin = span * margin_fraction if span > 0 else 0.05
-    return vmin - margin, vmax + margin
+def neutral_widths(s, V):
+    """Толщины нейтральных баз w_n = d_n-стороны − x_n(V), w_p = d_p-стороны − x_p(V), см.
+    Возвращает (w_n, w_p, смыкание) — w ограничены снизу W_MIN."""
+    xn, xp = depletion_edges(s, V)
+    wn = s.n_side.thickness - xn
+    wp = s.p_side.thickness - xp
+    punch = bool(np.any(wn <= 0) or np.any(wp <= 0))
+    return np.maximum(wn, W_MIN), np.maximum(wp, W_MIN), punch
 
 
-def adaptive_point_count(v_min, v_max, base_count=121, resolution_V=0.01, max_count=400):
-    """Число точек расчёта ВАХ: гуще на широком диапазоне напряжений, но не
-    в ущерб отклику интерфейса (solve_iv — метод Ньютона, до 60 итераций на
-    точку)."""
-    span = max(v_max - v_min, 0.0)
-    return int(np.clip(np.ceil(span / resolution_V), base_count, max_count))
+def minority_transport(s):
+    """D и L неосновных: дырки в n-области, электроны в p-области (2.5), (2.6), τ по (5.9).
+    Возвращает ((D_p, L_p), (D_n, L_n))."""
+    Dp = diffusion_coefficient(s.n_side.mu_minority, s.T)
+    Dn = diffusion_coefficient(s.p_side.mu_minority, s.T)
+    Lp = diffusion_length(Dp, minority_lifetime(s.n_side, s.N_dis))
+    Ln = diffusion_length(Dn, minority_lifetime(s.p_side, s.N_dis))
+    return (Dp, Lp), (Dn, Ln)
+
+
+def saturation_current_density_parts(s, V):
+    """(4.3) Слагаемые J_s(V): дырки в n-области и электроны в p-области, А/см².
+
+    Вывод: граничное условие (4.1) n_p(−x_p) = n_p0·e^{qV/kT} [Зи, с. 92, ур. (28),
+    (31)–(33)]; [Ш49, с. 458, ур. (4.4)]; уравнение диффузии (4.2)
+    d²Δn/dx′² − Δn/L² = 0 [Зи, с. 94, ур. (39)]; [Ш49, с. 470, ур. (5.4)].
+    J_s = qD_p·p_n0/L_p·f(w_n/L_p) + qD_n·n_p0/L_n·f(w_p/L_n) —
+    [Зи, с. 94, ур. (44), (45)]; [Ш49, с. 460, ур. (4.13)]."""
+    (Dp, Lp), (Dn, Ln) = minority_transport(s)
+    p_n0, n_p0 = s.minority
+    wn, wp, _ = neutral_widths(s, V)
+    holes = Q * Dp * p_n0 / Lp * boundary_factor(wn / Lp, s.n_side.boundary)
+    electrons = Q * Dn * n_p0 / Ln * boundary_factor(wp / Ln, s.p_side.boundary)
+    return holes, electrons
+
+
+def saturation_current_density(s, V):
+    """(4.3) J_s(V), А/см²."""
+    holes, electrons = saturation_current_density_parts(s, V)
+    return holes + electrons
+
+
+EXP_LIMIT = 700.0  # защита exp от переполнения
+
+
+def _expm1(x):
+    return np.expm1(np.clip(x, -EXP_LIMIT, EXP_LIMIT))
+
+
+def diffusion_current(s, V):
+    """(4.4) I_diff = A·J_s(V)·(e^{qV/kT} − 1), А."""
+    V = np.asarray(V, dtype=float)
+    return s.area * saturation_current_density(s, V) * _expm1(V / s.Vt)
+
+
+# ------------------------------------- §5. Генерация–рекомбинация в ОПЗ --
+
+def sns_factor(s, V):
+    """(5.5) Опция «уточнение SNS»: F = min{1, π(kT/q)/(V_bi − V)} при V ≥ 3kT/q —
+    [СНШ57, с. 1231, ур. (15), (16)]; на 0 < V < 3kT/q — линейная
+    интерполяция от 1 (интерполяция); при V ≤ 0 F = 1."""
+    V = np.asarray(V, dtype=float)
+
+    def F(v):
+        gap = s.Vbi - v
+        return np.where(gap > np.pi * s.Vt, np.pi * s.Vt / np.where(gap > 0, gap, 1.0), 1.0)
+
+    v3 = 3.0 * s.Vt
+    F3 = F(v3)
+    return np.where(V >= v3, F(V), np.where(V > 0, 1.0 + (F3 - 1.0) * V / v3, 1.0))
+
+
+def gr_area(s, V):
+    """Площадь для тока ОПЗ: A или A + ΔA (1.3) при включённой опции."""
+    return s.area + edge_area(s, V) if s.edge_area else s.area * np.ones_like(np.asarray(V, dtype=float))
+
+
+def gr_current(s, V):
+    """(5.4) I_gr = A·q·n_i·W(V)/(2τ₀)·(e^{qV/n₂kT} − 1), А.
+
+    Вывод: скорость рекомбинации (5.1) U = (pn − n_i²)/[τ_p0(n + n₁) + τ_n0(p + p₁)]
+    [СНШ57, с. 1230, ур. (6)]; [Зи, с. 98, ур. (51)]; её максимум при n = p
+    (5.3) U_max = n_i/(2τ₀)·(e^{qV/2kT} − 1) [СНШ57, с. 1231, ур. (13)].
+
+    При n₂ = 2 при обратном смещении это [СНШ57, с. 1230, ур. (11)] =
+    [Зи, с. 97, ур. (48)], при прямом — [Зи, с. 99, ур. (54)] (верхняя
+    оценка). n₂ ≠ 2 — эмпирика (5.6) [Ман20, с. 45–46]; τ₀ по (5.10)."""
+    V = np.asarray(V, dtype=float)
+    J = Q * s.ni * depletion_width(s, V) / (2.0 * scr_lifetime(s)) * _expm1(V / (s.n2 * s.Vt))
+    if s.sns_refinement:
+        J = J * sns_factor(s, V)
+    return gr_area(s, V) * J
+
+
+# -------------------------------------------------- §6. Полный ток (6.1) --
+
+def shunt_current(s, V):
+    """V_d/R_sh, А — [Зи, с. 97, п. 1]."""
+    V = np.asarray(V, dtype=float)
+    return V / s.Rsh if np.isfinite(s.Rsh) else np.zeros_like(V)
+
+
+def leak_current(s, V):
+    """I_L·sign(V_d)·|V_d/1 В|^m, А — мягкая обратная ВАХ [Кур74, с. 167–168]; эмпирика."""
+    V = np.asarray(V, dtype=float)
+    return s.I_L * np.sign(V) * np.abs(V) ** s.m_leak
+
+
+def components(s, Vd):
+    """Компоненты тока (6.1) при напряжении на переходе V_d: I_diff, I_gr, I_sh, I_L, А."""
+    return {
+        "diff": diffusion_current(s, Vd),
+        "gr": gr_current(s, Vd),
+        "sh": shunt_current(s, Vd),
+        "L": leak_current(s, Vd),
+    }
+
+
+def junction_current(s, Vd):
+    """Сумма компонент (6.1) при напряжении на переходе V_d, А."""
+    return sum(components(s, Vd).values())
+
+
+@dataclass
+class IVResult:
+    V: np.ndarray
+    I: np.ndarray
+    Vd: np.ndarray
+    parts: dict
+    warnings: list
+
+
+MAX_NEWTON = 100
+
+
+def _solve_point(s, V, I_guess):
+    """Ньютон по I для I = F(V − I·R_s); шаг ограничен так, что |ΔI·R_s| ≤ 2kT/q."""
+    if s.Rs == 0:
+        return float(junction_current(s, V)), True
+    I = I_guess
+    max_dv = 2.0 * s.Vt
+    for _ in range(MAX_NEWTON):
+        Vd = V - I * s.Rs
+        F = float(junction_current(s, Vd))
+        h = 1e-6
+        dF = float(junction_current(s, Vd + h) - junction_current(s, Vd - h)) / (2 * h)
+        g = I - F
+        step = -g / (1.0 + s.Rs * dF)
+        if abs(step) * s.Rs > max_dv:
+            step = np.sign(step) * max_dv / s.Rs
+        I += step
+        if abs(step) <= 1e-10 * abs(I) + 1e-18:
+            return I, True
+    return float("nan"), False
+
+
+def solve_iv(s, V):
+    """(6.1) I = I_diff(V_d) + I_gr(V_d) + V_d/R_sh + I_L·sign(V_d)|V_d/1 В|^m, V_d = V − I·R_s.
+
+    Ньютон по I с ограничением шага; развёртка от V = 0 к краям (решение
+    соседней точки — начальное приближение); не более 100 итераций; при
+    несходимости — NaN и предупреждение. R_s — [Зи, с. 97, п. 5; рис. 21, с. 99]."""
+    V = np.asarray(V, dtype=float)
+    I = np.full_like(V, np.nan)
+    order = np.argsort(np.abs(V))
+    failed = []
+    # два прохода от V ≈ 0: вверх и вниз, чтобы начальное приближение было соседним
+    for sign in (1, -1):
+        guess = 0.0
+        for idx in sorted((i for i in order if np.sign(V[i]) in (sign, 0)),
+                          key=lambda i: abs(V[i])):
+            value, ok = _solve_point(s, float(V[idx]), guess)
+            I[idx] = value
+            if ok:
+                guess = value
+            else:
+                failed.append(float(V[idx]))
+    Vd = V - np.nan_to_num(I) * s.Rs
+    warnings = []
+    if failed:
+        warnings.append(f"Решатель (6.1) не сошёлся в {len(failed)} точках — там NaN.")
+    return IVResult(V=V, I=I, Vd=Vd, parts=components(s, Vd), warnings=warnings)
+
+
+# ------------------------------------------ Справочник: проверки §1, §6 --
+
+def low_injection_voltage(s):
+    """§6.4. Граница низкой инжекции V_LI = (kT/q)·ln(0.1·M_B/m_B0), В: M_B, m_B0 — равновесные основные
+    и неосновные носители более слабой стороны (2.4). Условие —
+    [Зи, с. 94, перед ур. (38)]; выше V_LI модель неприменима [Зи, с. 97, п. 4]."""
+    weak = s.n_side if s.n_side.N < s.p_side.N else s.p_side
+    M, m = equilibrium_carriers(weak.N, s.ni)
+    return s.Vt * np.log(0.1 * M / m)
+
+
+ISOLATED, EDGE, NOT_ISOLATED = "ok", "warn", "error"
+
+
+def isolation_status(s, V):
+    """(1.2) Изоляция перехода травлением мезы при смещении V.
+    Возвращает (уровень, текст): уровень ok / warn / error."""
+    if s.scenario == SCENARIO_A:
+        if s.h > s.d_n:
+            return ISOLATED, "переход изолирован (h > d_n)"
+        return NOT_ISOLATED, "не изолирован: h ≤ d_n"
+    xn, xp = depletion_edges(s, V)
+    xn, xp = float(xn), float(xp)
+    if s.h < s.d_epi - xn:
+        return NOT_ISOLATED, "не изолирован: n-слой соединяет мезу с полем"
+    if s.h < s.d_epi + xp:
+        return EDGE, "ОПЗ выходит на поверхность поля у подножия мезы"
+    return ISOLATED, "ОПЗ внутри мезы"
+
+
+RECOMMEND_REFLECT = "отражение"
+RECOMMEND_SINK = "сток"
+RECOMMEND_INTERMEDIATE = "промежуточный"
+
+
+def _recommend(N_layer, N_neighbour):
+    """Правило ТЗ (6.2): соседний слой того же типа легирован в ≥ 10 раз
+    сильнее → отражение; в ≥ 10 раз слабее или металл → сток; иначе промежуточный."""
+    if N_neighbour is None or N_neighbour <= N_layer / 10.0:
+        return RECOMMEND_SINK
+    if N_neighbour >= 10.0 * N_layer:
+        return RECOMMEND_REFLECT
+    return RECOMMEND_INTERMEDIATE
+
+
+def boundary_recommendations(s):
+    """(6.2) Рекомендации для дальних границ n- и p-стороны текущего сценария.
+    Возвращает {"n": (граница, рекомендация), "p": (...)}; None — металл."""
+    if s.scenario == SCENARIO_A:
+        return {"n": ("верхний контакт", _recommend(s.ND_plus, None)),
+                "p": ("граница i/подложка", _recommend(s.N_i, s.substrate[0]))}
+    return {"n": ("граница n/n⁺", _recommend(s.N_i, s.ND_plus)),
+            "p": ("тыльный контакт", _recommend(s.substrate[0], None))}
+
+
+def drude_mean_free_path(vth, mu, m_rel):
+    """λ = v_th·μ·m_cc/q, см — оценка (соотношение Друде); источника со
+    страницей в проекте нет, только для сравнения с L."""
+    from mesa_diode.simulator.materials import M0
+    return (vth * 1e-2) * (mu * 1e-4) * (m_rel * M0) / Q * 1e2
+
+
+# ------------------------------------- §6.3. Идеальность из эксперимента --
+
+N_RISE = 0.20   # правило ТЗ: V₂ — локальный n превысил минимум на [V₁; V] более чем на 20 %
+
+
+@dataclass
+class IdealityResult:
+    n: float
+    dn: float
+    I0: float
+    V1: float
+    V2: float
+    V_local: np.ndarray    # напряжение на переходе для локального n(V)
+    n_local: np.ndarray
+
+
+def local_ideality(V, I, T):
+    """(6.4)/(6.5) n = [(kT/q)·d ln I/dV]⁻¹ центральными разностями —
+    [Ман20, с. 46, ур. (4), (5)]."""
+    return 1.0 / (thermal_voltage(T) * np.gradient(np.log(I), V))
+
+
+def ideality_from_data(V, I, T=300.0, Rs=0.0, window=None):
+    """Коэффициент идеальности по прямой ветви (алгоритм §6.3).
+
+    1) V > 0, I > 0; при R_s > 0 V заменяется на V − I·R_s;
+    2) локальный n(V) по (6.5);
+    3) окно: V₁ = 3kT/q, V₂ — первая точка, где n превышает минимум на
+       [V₁; V] более чем на 20 % (правило ТЗ); window = (V₁, V₂) задаёт окно вручную;
+    4) n ± δn — подгонка (6.3) I = I₀[exp(qV/nkT) − 1] по ln I (curve_fit)
+       [Ман20, с. 45, ур. (2)].
+    Возвращает IdealityResult или None, если точек меньше трёх."""
+    from scipy.optimize import curve_fit
+
+    V = np.asarray(V, dtype=float)
+    I = np.asarray(I, dtype=float)
+    mask = np.isfinite(V) & np.isfinite(I) & (V > 0) & (I > 0)
+    V, I = V[mask], I[mask]
+    if V.size < 3:
+        return None
+    Vj = V - I * Rs if Rs > 0 else V.copy()
+    order = np.argsort(Vj)
+    Vj, I = Vj[order], I[order]
+    Vt = thermal_voltage(T)
+    n_loc = local_ideality(Vj, I, T)
+
+    if window is None:
+        V1 = 3.0 * Vt
+        V2 = Vj[-1]
+        running = np.inf
+        for v, n in zip(Vj, n_loc):
+            if v < V1 or not np.isfinite(n) or n <= 0:
+                continue
+            running = min(running, n)
+            if n > (1.0 + N_RISE) * running:
+                V2 = v
+                break
+        # Подгонка двух параметров требует не менее трёх точек: на редких
+        # данных окно по правилу 20 % расширяется до третьей точки от V₁.
+        above = Vj[Vj >= V1]
+        if above.size >= 3 and ((Vj >= V1) & (Vj <= V2)).sum() < 3:
+            V2 = above[2]
+    else:
+        V1, V2 = window
+    sel = (Vj >= V1) & (Vj <= V2)
+    if sel.sum() < 3:
+        return None
+    x, y = Vj[sel], np.log(I[sel])
+
+    def model(v, lnI0, n):
+        return lnI0 + np.log(np.expm1(v / (n * Vt)))
+
+    slope, intercept = np.polyfit(x, y, 1)
+    n0 = 1.0 / (Vt * slope) if slope > 0 else 1.5
+    try:
+        popt, pcov = curve_fit(model, x, y, p0=(intercept, n0),
+                               bounds=([-200.0, 0.3], [50.0, 20.0]))
+    except (RuntimeError, ValueError):
+        return None
+    dn = float(np.sqrt(pcov[1, 1])) if np.isfinite(pcov[1, 1]) else float("nan")
+    return IdealityResult(n=float(popt[1]), dn=dn, I0=float(np.exp(popt[0])),
+                          V1=float(V1), V2=float(V2), V_local=Vj, n_local=n_loc)
+
+
+def empirical_current(V, I0, n, T=300.0):
+    """(6.3) I = I₀[exp(qV/nkT) − 1] — [Ман20, с. 45, ур. (2)]; эмпирика."""
+    return I0 * _expm1(np.asarray(V, dtype=float) / (n * thermal_voltage(T)))
+
+
+def effective_ideality(I_diff, I_gr):
+    """(6.6) n_eff = (I_diff + I_gr)/(I_diff + I_gr/2) — подстановка (4.4) и (5.4)
+    в (6.4) при V ≫ kT/q."""
+    return (I_diff + I_gr) / (I_diff + I_gr / 2.0)
+
+
+def gr_share_from_ideality(n):
+    """Доля тока ОПЗ из (6.6): 2(1 − 1/n)."""
+    return 2.0 * (1.0 - 1.0 / n)
+
+
+# ------------------------------------------- §6.6. Сравнение сценариев --
+
+def _rms(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    return float(np.sqrt(np.mean(values ** 2))) if values.size else float("nan")
+
+
+def current_mismatch(s, V_exp, I_exp):
+    """(6.7) δ_I = √(Σ(lg|I_mod| − lg|I_exp|)²/N) по точкам |V| > kT/q;
+    для сценария B — только обратная ветвь. Метрика ТЗ."""
+    V_exp = np.asarray(V_exp, dtype=float)
+    I_exp = np.asarray(I_exp, dtype=float)
+    mask = (np.abs(V_exp) > s.Vt) & (I_exp != 0) & np.isfinite(I_exp)
+    if s.scenario == SCENARIO_B:
+        mask &= V_exp < 0
+    if not mask.any():
+        return float("nan")
+    I_mod = solve_iv(s, V_exp[mask]).I
+    ok = I_mod != 0
+    return _rms(np.log10(np.abs(I_mod[ok])) - np.log10(np.abs(I_exp[mask][ok])))
+
+
+def capacitance_mismatch(s, V_exp, C_exp):
+    """(6.8) δ_C = √(Σ((C_mod − C_exp)/C_exp)²/N). Метрика ТЗ."""
+    V_exp = np.asarray(V_exp, dtype=float)
+    C_exp = np.asarray(C_exp, dtype=float)
+    mask = np.isfinite(C_exp) & (C_exp > 0)
+    if not mask.any():
+        return float("nan")
+    C_mod = capacitance(s, V_exp[mask])
+    return _rms((C_mod - C_exp[mask]) / C_exp[mask])
+
+
+def scenario_summary(s, exp_iv=None, exp_cv=None, window=None):
+    """Строка таблицы §6.6 для одного сценария: V_bi, W(0), C(0), C(−1 В),
+    N_eff, отсечка 1/C², I(−1 В), n_мод, V_LI, δ_I, δ_C, изоляция (1.2)."""
+    V_fwd = np.linspace(0.0, max(0.5, s.Vbi), 121)
+    iv = solve_iv(s, V_fwd)
+    ideality = ideality_from_data(V_fwd, iv.I, s.T, s.Rs, window)
+    return {
+        "scenario": s.scenario,
+        "Vbi": s.Vbi,
+        "W0": float(depletion_width(s, 0.0)),
+        "C0": float(capacitance(s, 0.0)),
+        "Cm1": float(capacitance(s, -1.0)),
+        "N_eff": s.N_eff,
+        "cutoff": c2_cutoff(s),
+        "I_m1": float(solve_iv(s, np.array([-1.0])).I[0]),
+        "n_mod": ideality.n if ideality else float("nan"),
+        "V_LI": low_injection_voltage(s),
+        "delta_I": current_mismatch(s, *exp_iv) if exp_iv is not None else float("nan"),
+        "delta_C": capacitance_mismatch(s, *exp_cv) if exp_cv is not None else float("nan"),
+        "isolation": isolation_status(s, 0.0)[1],
+    }
+
+
+def compare_scenarios(s, exp_iv=None, exp_cv=None, c2_window=None, window=None):
+    """Режим «оба» (§6.6): расчёт A и B с общими параметрами, без подгонки.
+
+    exp_iv = (V, I), exp_cv = (V, C) — эксперимент. Главный критерий —
+    N из наклона экспериментальной 1/C² (3.5) против N_eff сценариев;
+    второй — абсолютная ёмкость. Возвращает {"A": {...}, "B": {...}, "N_exp": ...}."""
+    result = {sc: scenario_summary(s.with_scenario(sc), exp_iv, exp_cv, window)
+              for sc in SCENARIOS}
+    N_exp = float("nan")
+    if exp_cv is not None:
+        V, C = (np.asarray(a, dtype=float) for a in exp_cv)
+        win = c2_window if c2_window is not None else (V.min(), 0.0)
+        N_exp, _ = fit_inv_c2(V, C, s.area, s.eps, win)
+    result["N_exp"] = N_exp
+    return result

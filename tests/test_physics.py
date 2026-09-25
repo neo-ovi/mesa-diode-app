@@ -518,7 +518,9 @@ def test_modes_select_model_and_editable_fields():
     assert basic_keys - presets.EMPIRICAL_KEYS < extended < fit
     assert not presets.EMPIRICAL_KEYS & (extended | fit)
     assert {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub", "N_dis", "implant_dose"} <= extended
-    assert {"mu_n", "tau0_bg", "sigma_R_epi", "n2", "I_L"}.isdisjoint(extended)
+    assert {"mu_n", "tau0_bg", "sigma_R_epi", "n2"}.isdisjoint(extended)
+    # эквивалентная схема (R_s, I_mod, R_sh, I_L, m) — во всех режимах
+    assert presets.CIRCUIT_KEYS <= basic_keys and presets.CIRCUIT_KEYS <= extended
     assert fit | presets.EMPIRICAL_KEYS == {s.key for s in presets.NUMERIC_PARAMS}
 
 

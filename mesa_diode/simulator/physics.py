@@ -212,6 +212,7 @@ class Structure:
     sigma_R_sub: float = 5.5e-4      # подложка
     n2: float = 2.0
     Rs: float = 0.0
+    I_mod: float = float("inf")       # ток модуляции R_s (6.9), А; inf — R_s постоянно
     Rsh: float = float("inf")
     I_L: float = 0.0
     m_leak: float = 3.0
@@ -606,55 +607,50 @@ class IVResult:
     warnings: list
 
 
-MAX_NEWTON = 100
+BISECTION_STEPS = 64   # 2⁻⁶⁴ от |V|: точность V_d лучше 10⁻¹⁸ В
 
 
-def _solve_point(s, V, I_guess):
-    """Ньютон по I для I = F(V − I·R_s); шаг ограничен так, что |ΔI·R_s| ≤ 2kT/q."""
-    if s.Rs == 0:
-        return float(junction_current(s, V)), True
-    I = I_guess
-    max_dv = 2.0 * s.Vt
-    for _ in range(MAX_NEWTON):
-        Vd = V - I * s.Rs
-        F = float(junction_current(s, Vd))
-        h = 1e-6
-        dF = float(junction_current(s, Vd + h) - junction_current(s, Vd - h)) / (2 * h)
-        g = I - F
-        step = -g / (1.0 + s.Rs * dF)
-        if abs(step) * s.Rs > max_dv:
-            step = np.sign(step) * max_dv / s.Rs
-        I += step
-        if abs(step) <= 1e-10 * abs(I) + 1e-18:
-            return I, True
-    return float("nan"), False
+def series_resistance(s, I):
+    """(6.9) R_s(I) = R_s/(1 + |I|/I_mod), Ом — эмпирика: модуляция проводимости
+    высокоомной базы при высоком уровне инжекции [Зи, с. 97, п. 4]; I_mod = ∞ —
+    R_s постоянно [Зи, с. 97, п. 5]."""
+    I = np.asarray(I, dtype=float)
+    if not np.isfinite(s.I_mod):
+        return np.full_like(I, s.Rs)
+    return s.Rs / (1.0 + np.abs(I) / s.I_mod)
 
 
 def solve_iv(s, V):
-    """(6.1) I = I_diff(V_d) + I_gr(V_d) + V_d/R_sh + I_L·sign(V_d)|V_d/1 В|^m, V_d = V − I·R_s.
+    """(6.1) I = I_diff(V_d) + I_gr(V_d) + V_d/R_sh + I_L·sign(V_d)|V_d/1 В|^m,
+    V_d = V − I·R_s(I) по (6.9).
 
-    Ньютон по I с ограничением шага; развёртка от V = 0 к краям (решение
-    соседней точки — начальное приближение); не более 100 итераций; при
-    несходимости — NaN и предупреждение. R_s — [Зи, с. 97, п. 5; рис. 21, с. 99]."""
+    Уравнение решается относительно V_d: h(V_d) = V_d + F(V_d)·R_s(F) − V
+    монотонно растёт, поэтому корень единственный и лежит между 0 и V;
+    он находится бисекцией сразу для всех точек (64 шага). Если сумма
+    компонент не конечна — NaN и предупреждение. R_s — [Зи, с. 97, п. 5;
+    рис. 21, с. 99]."""
     V = np.asarray(V, dtype=float)
-    I = np.full_like(V, np.nan)
-    order = np.argsort(np.abs(V))
-    failed = []
-    # два прохода от V ≈ 0: вверх и вниз, чтобы начальное приближение было соседним
-    for sign in (1, -1):
-        guess = 0.0
-        for idx in sorted((i for i in order if np.sign(V[i]) in (sign, 0)),
-                          key=lambda i: abs(V[i])):
-            value, ok = _solve_point(s, float(V[idx]), guess)
-            I[idx] = value
-            if ok:
-                guess = value
-            else:
-                failed.append(float(V[idx]))
-    Vd = V - np.nan_to_num(I) * s.Rs
+    if s.Rs == 0:
+        Vd = V.copy()
+    else:
+        lo = np.minimum(V, 0.0)
+        hi = np.maximum(V, 0.0)
+        with np.errstate(over="ignore", invalid="ignore"):
+            for _ in range(BISECTION_STEPS):
+                mid = 0.5 * (lo + hi)
+                F = junction_current(s, mid)
+                h = mid + F * series_resistance(s, F) - V
+                above = ~(h <= 0)          # NaN и +∞ считаются «выше корня»
+                hi = np.where(above, mid, hi)
+                lo = np.where(above, lo, mid)
+        Vd = 0.5 * (lo + hi)
+    with np.errstate(over="ignore", invalid="ignore"):
+        I = np.asarray(junction_current(s, Vd), dtype=float)
+    bad = ~np.isfinite(I)
+    I = np.where(bad, np.nan, I)
     warnings = []
-    if failed:
-        warnings.append(f"Решатель (6.1) не сошёлся в {len(failed)} точках — там NaN.")
+    if bad.any():
+        warnings.append(f"Решатель (6.1) не сошёлся в {int(bad.sum())} точках — там NaN.")
     return IVResult(V=V, I=I, Vd=Vd, parts=components(s, Vd), warnings=warnings)
 
 

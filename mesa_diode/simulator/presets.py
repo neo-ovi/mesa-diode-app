@@ -59,6 +59,7 @@ NUMERIC_PARAMS = [
     ParamSpec("sigma_R_sub", "σ_R: подложка", "см²/с", "sigma_R_sub"),
     ParamSpec("n2", "показатель тока ОПЗ n₂", "—", "n2"),
     ParamSpec("Rs", "последовательное сопротивление R_s", "Ом", "Rs"),
+    ParamSpec("I_mod", "ток модуляции R_s (inf — R_s постоянно)", "А", "I_mod"),
     ParamSpec("Rsh", "шунт R_sh", "Ом", "Rsh"),
     ParamSpec("I_L", "нелинейная утечка I_L", "А", "I_L"),
     ParamSpec("m_leak", "показатель утечки m", "—", "m_leak"),
@@ -99,11 +100,14 @@ MODE_LABELS = {MODE_BASIC: "Базовая модель", MODE_EXTENDED: "Рас
 MODE_MODEL = {MODE_BASIC: ph.MODEL_EMPIRICAL, MODE_EXTENDED: ph.MODEL_PHYSICAL,
               MODE_FIT: ph.MODEL_PHYSICAL}
 EMPIRICAL_KEYS = frozenset({"n_emp", "J0_emp"})
-BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T", "Rs", "Rsh"}) | EMPIRICAL_KEYS
+# Эквивалентная схема (R_s, его модуляция, шунт, нелинейная утечка) нужна
+# и эмпирической, и физической модели: без неё не описать изгиб ветвей ВАХ.
+CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
+BASIC_KEYS = frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "T"}) | CIRCUIT_KEYS | EMPIRICAL_KEYS
 MEASURED_KEYS = (BASIC_KEYS - EMPIRICAL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub",
                                                  "N_dis"} | STORED_KEYS
 FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
-                           "tau_n_bg", "tau_p_bg", "tau0_bg", "n2", "I_L", "m_leak"})
+                           "tau_n_bg", "tau_p_bg", "tau0_bg", "n2"})
 MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: MEASURED_KEYS,
              MODE_FIT: MEASURED_KEYS | FIT_ONLY_KEYS}
 
@@ -137,6 +141,7 @@ DEFAULT_PARAMS = {
     "sigma_R_sub": 5.5e-4,
     "n2": 2.0,
     "Rs": 10.0,
+    "I_mod": float("inf"),
     "Rsh": 1e6,
     "I_L": 0.0,
     "m_leak": 3.0,

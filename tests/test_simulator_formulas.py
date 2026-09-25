@@ -5,6 +5,7 @@ GUI не поднимается: проверяются данные реест�
 нет Tk (Linux-CI без python3-tk), модуль импортируется с заглушкой.
 """
 
+import importlib
 import re
 import sys
 from pathlib import Path
@@ -30,7 +31,9 @@ from mesa_diode.simulator import presets
 MATH = MathTextParser("agg")
 FORBIDDEN = (r"\text", r"\operatorname", r"\begin")
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-PHYSICS_SOURCE = Path(ph.__file__).read_text(encoding="utf-8")
+# Формулы модели — в docstring physics.py, формулы автоподгонки (§6.7) — в fitting.py.
+PHYSICS_SOURCE = "\n".join(Path(m.__file__).read_text(encoding="utf-8")
+                           for m in (ph, importlib.import_module("mesa_diode.simulator.fitting")))
 
 
 def _blocks(kind):

@@ -46,7 +46,7 @@ def test_empirical_fit_recovers_parameters_and_mechanisms():
     s = _empirical()
     V, I = _synthetic(s, noise=0.002, quantum=1e-7)
     start = replace_params(s, Rs=100.0, Rsh=1e5, I_L=0.0, I_mod=float("inf"))
-    r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL)
+    r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, target=0.0)      # только BIC
     assert set(r.terms) == {fitting.TERM_LEAK, fitting.TERM_MOD}
     assert r.error < 0.01
     for key, true in (("n_emp", 1.3), ("Rs", 130.0), ("m_leak", 2.3), ("J0_emp", 1.5e-2)):
@@ -95,8 +95,9 @@ def test_reference_iv_is_described_within_one_percent():
     V, I = load_xy_file(files[0])
     s = presets.to_structure({**ref.params, "mode": presets.MODE_BASIC})
     r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
-    assert r.error < 0.01
-    assert set(r.terms) == {fitting.TERM_LEAK, fitting.TERM_MOD}
+    assert fitting.TERM_LEAK in r.terms and r.error <= fitting.TARGET_ERROR
+    strict = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, target=0.0)
+    assert strict.error < 0.01 and set(strict.terms) == {fitting.TERM_LEAK, fitting.TERM_MOD}
 
 
 def test_locked_parameters_keep_entered_values():
@@ -104,7 +105,7 @@ def test_locked_parameters_keep_entered_values():
     s = _empirical()
     V, I = _synthetic(s, noise=0.002, quantum=1e-7)
     start = replace_params(s, Rs=130.0, n_emp=1.5, I_L=0.0, I_mod=float("inf"))
-    r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, locked={"Rs", "tau_n_bg"})
+    r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, locked={"Rs", "tau_n_bg"}, target=0.0)
     assert r.params["Rs"] == 130.0 and "Rs" in r.locked
     assert r.params["n_emp"] == pytest.approx(1.3, rel=0.05)
     assert any("Зафиксированы" in n for n in r.notes)
@@ -134,3 +135,40 @@ def test_fittable_fields():
     phys = fitting.fittable_fields(fitting.PHYSICAL)
     assert {"tau0_bg", "tau_n_bg", "tau_p_bg"} <= phys and "n_emp" not in phys
     assert "rho_sub" in presets.editable_keys(presets.MODE_BASIC)
+
+
+def test_simplest_adequate_variant_is_chosen():
+    """Физичность прежде точности: из вариантов с δ ≤ 5 % — самый простой."""
+    s = _empirical()
+    V, I = _synthetic(s, noise=0.002, quantum=1e-7)
+    r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
+    chosen = next(c for c in r.candidates if c.accepted)
+    assert chosen.error <= fitting.TARGET_ERROR
+    assert all(len(c.terms) >= len(chosen.terms) for c in r.candidates if c.error <= fitting.TARGET_ERROR)
+    assert any("самый простой" in n for n in r.notes)
+
+
+def test_selection_falls_back_to_bic():
+    cands = [fitting.Candidate((), {}, 0.30, 100.0), fitting.Candidate(("leak",), {}, 0.20, 50.0),
+             fitting.Candidate(("mod",), {}, 0.25, 95.0)]
+    assert fitting.select_variant(cands).terms == ("leak",)
+    cands[0].error = 0.04
+    assert fitting.select_variant(cands).terms == ()
+
+
+def test_ideality_bound_signals_other_mechanism():
+    """n > 2 в данных: подгонка упирается в границу и объясняет это."""
+    s = _empirical(n_emp=2.0, I_L=0.0, I_mod=float("inf"), Rs=1.0)
+    V = np.linspace(-2, 0.8, 300)
+    I = s.area * s.J0_emp * np.expm1(V / (3.0 * ph.thermal_voltage(300.0))) + V / s.Rsh
+    r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
+    assert "n_emp" in r.at_bounds
+    assert any("n вне [1, 2]" in n for n in r.notes)
+
+
+def test_diode_resistance_is_not_mistaken_for_modulation():
+    """Спад dV/dI самого диода (n·kT/qI) не выдаётся за модуляцию R_s."""
+    s = _empirical(I_L=0.0, I_mod=float("inf"), Rs=50.0)
+    V, I = _synthetic(s, noise=0.001)
+    r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
+    assert not any("падает с ростом тока" in n for n in r.notes)

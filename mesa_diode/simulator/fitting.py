@@ -46,7 +46,9 @@ CORE = {
 # Параметр → (поле Structure, логарифмическая шкала, нижняя, верхняя граница).
 PARAMS = {
     "J0_emp": ("J0_emp", True, 1e-15, 1e3),
-    "n_emp": ("n_emp", False, 0.5, 8.0),
+    # n: 1 — диффузия [Зи, с. 94], 2 — рекомбинация в ОПЗ [СНШ57]; вне [1, 2]
+    # формула (6.3) теряет физический смысл — упор в границу сообщает о другом механизме.
+    "n_emp": ("n_emp", False, 1.0, 2.0),
     "Rs": ("Rs", True, 1e-3, 1e6),
     "Rsh": ("Rsh", True, 1.0, 1e12),
     "I_L": ("I_L", True, 1e-14, 1.0),
@@ -72,6 +74,11 @@ def fittable_fields(model):
     params = set(CORE[model]) | {p for _name, keys in TERMS.values() for p in keys}
     return {f for f, p in FIELD_TO_PARAM.items() if p in params}
 
+
+# Достаточная точность описания (критерий проекта): физическая модель, дающая
+# δ (6.10) в пределах 4–8 %, адекватна; из таких вариантов берётся самый простой.
+TARGET_ERROR = 0.05
+LOOSE_STDERR = 1.0     # относительная погрешность > 100 % — параметр данными не определён
 
 BIC_GAIN = 10.0        # механизм добавляется, если BIC падает больше чем на 10 [KR95]
 MAX_POINTS = 400       # точки ВАХ для подгонки (равномерно по напряжению)
@@ -102,6 +109,8 @@ class FitResult:
     candidates: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     locked: tuple = ()              # параметры подгонки, зафиксированные пользователем
+    target: float = TARGET_ERROR    # достаточная ошибка (6.10) при выборе варианта
+    at_bounds: tuple = ()           # параметры, упёршиеся в границу допустимых значений
 
     def structure_values(self):
         """Значения для полей окна (ключи presets): τ_bg → τ_n^bg и τ_p^bg."""
@@ -221,13 +230,24 @@ def _stderr(keys, logs, jac, res):
     """Относительные погрешности из ковариации (JᵀJ)⁻¹·RSS/(N − k)."""
     n, k = res.size, len(keys)
     out = {key: float("nan") for key in keys}
-    if n <= k:
+    if k == 0 or n <= k:
         return out
+    # Направления в пространстве параметров, вдоль которых невязки почти не меняются
+    # (сингулярные числа якобиана ≤ 10⁻⁷ от наибольшего), данными не определены.
+    # Параметр, лежащий в основном в таких направлениях, получает погрешность ∞
+    # (псевдообратная матрица дала бы ложный ноль).
     try:
-        cov = np.linalg.pinv(jac.T @ jac) * float(np.sum(res ** 2)) / (n - k)
+        _u, sv, vt = np.linalg.svd(jac, full_matrices=False)
     except np.linalg.LinAlgError:
         return out
+    weak = sv <= 1e-7 * max(float(sv.max()), 1e-300)
+    blind = (vt[weak] ** 2).sum(axis=0) > 0.5
+    inv = np.where(weak, 0.0, 1.0 / np.maximum(sv, 1e-300) ** 2)
+    cov = (vt.T * inv) @ vt * float(np.sum(res ** 2)) / (n - k)
     for i, (key, lg) in enumerate(zip(keys, logs)):
+        if blind[i]:
+            out[key] = float("inf")
+            continue
         sigma = float(np.sqrt(max(cov[i, i], 0.0)))
         out[key] = sigma * np.log(10.0) if lg else sigma   # log10 → доля; линейный — абсолютная
     return out
@@ -260,12 +280,45 @@ def _locked_values(s, lock):
     return values
 
 
-def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=()):
+def select_variant(candidates, target=TARGET_ERROR):
+    """Выбор варианта модели (§6.7).
+
+    1. Физичность прежде точности: если есть варианты с ошибкой δ ≤ target,
+       берётся самый простой из них (меньше механизмов; при равенстве — меньший
+       BIC (6.11)). Лишний механизм не добавляется ради долей процента.
+    2. Если ни один вариант не достиг target, механизм добавляется, только если
+       BIC падает больше чем на BIC_GAIN [KR95]; сама недостижимость target —
+       признак того, что в модели чего-то не хватает (сообщается в пояснениях).
+    target = 0 — только критерий BIC."""
+    adequate = [c for c in candidates if c.error <= target]
+    if adequate:
+        return min(adequate, key=lambda c: (len(c.terms), c.bic))
+    best = None
+    for cand in candidates:
+        if best is None or cand.bic < best.bic - (BIC_GAIN if len(cand.terms) > len(best.terms) else 0.0):
+            best = cand
+    return best
+
+
+def _at_bounds(keys, logs, values, rtol=1e-3):
+    """Параметры, значения которых легли на границу допустимой области."""
+    out = []
+    for key, lg in zip(keys, logs):
+        lo, hi = PARAMS[key][2], PARAMS[key][3]
+        v = values[key]
+        a, b, x = (np.log10(lo), np.log10(hi), np.log10(v)) if lg else (lo, hi, v)
+        if abs(x - a) <= rtol * max(1.0, abs(b - a)) or abs(x - b) <= rtol * max(1.0, abs(b - a)):
+            out.append(key)
+    return tuple(out)
+
+
+def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERROR):
     """Подгонка ВАХ с выбором механизмов (§6.7).
 
     s — Structure с текущими параметрами (геометрия, легирование и т. д.);
     model — EMPIRICAL (эмпирическая модель (6.3)) или PHYSICAL (§4–§6).
     progress(text) — необязательный вызов для строки состояния.
+    target — достаточная ошибка (6.10) для выбора варианта (select_variant).
     locked — поля окна (ключи presets), зафиксированные пользователем: их
     значения берутся из s и не меняются."""
     base = replace(s, model=ph.MODEL_EMPIRICAL if model == EMPIRICAL else ph.MODEL_PHYSICAL)
@@ -281,7 +334,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=()):
     # Выключенные механизмы: утечка I_L = 0, модуляция I_mod = ∞.
     off = {"I_L": 0.0, "I_mod": float("inf")}
     candidates = []
-    best = None
+    best = None                      # лучший по BIC — только для начального приближения
     for terms in _variants(base, lock):
         if progress:
             progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
@@ -302,6 +355,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=()):
         candidates.append(cand)
         if best is None or cand.bic < best.bic - (BIC_GAIN if len(terms) > len(best.terms) else 0.0):
             best = cand
+    best = select_variant(candidates, target)
     best.accepted = True
     keys, logs, jac, res, Im = best._fit
     for cand in candidates:
@@ -312,12 +366,98 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=()):
         error=best.error,
         error_forward=relative_error(Im[fwd], I[fwd], floor) if fwd.any() else float("nan"),
         error_reverse=relative_error(Im[rev], I[rev], floor) if rev.any() else float("nan"),
-        bic=best.bic, V=V, I_exp=I, I_model=Im, candidates=candidates, locked=tuple(sorted(lock)))
+        bic=best.bic, V=V, I_exp=I, I_model=Im, candidates=candidates, locked=tuple(sorted(lock)),
+        target=target, at_bounds=_at_bounds(keys, logs, best.params))
     result.notes = explain(result, base)
     return result
 
 
 # ------------------------------------------------------------ пояснения --
+
+def _selection_notes(result):
+    """Почему выбран этот вариант: достаточная точность или BIC."""
+    target = 100 * result.target
+    chosen = next(c for c in result.candidates if c.accepted)
+    if result.target and chosen.error <= result.target:
+        better = [c for c in result.candidates if c.error < chosen.error and len(c.terms) > len(chosen.terms)]
+        text = (f"Выбор: самый простой вариант с ошибкой не больше {target:.0f} % — физичность важнее "
+                "долей процента.")
+        if better:
+            best = min(better, key=lambda c: c.error)
+            names = ", ".join(TERMS[t][0] for t in best.terms)
+            text += (f" С механизмом «{names}» ошибка была бы {100 * best.error:.2f} %; он не нужен для "
+                     "описания в пределах точности, но может быть реальным — проверьте его отдельным "
+                     "измерением или зафиксируйте, если он известен.")
+        return [text]
+    if result.target:
+        return [f"Ни один вариант не описывает ВАХ с ошибкой ≤ {target:.0f} % — в модели не хватает "
+                "механизма или неверны измеряемые параметры (геометрия, концентрации, T). Выбран вариант "
+                "по критерию BIC (6.11). Смотрите график отклонений: где систематическая волна — там и "
+                "недостающий механизм."]
+    return ["Выбор по критерию BIC (6.11)."]
+
+
+def _quality_notes(result):
+    """Параметры на границе и неопределённые — признаки неполноты модели."""
+    notes = []
+    for key in result.at_bounds:
+        lo, hi = PARAMS[key][2], PARAMS[key][3]
+        value = result.params[key]
+        side = "нижнюю" if abs(value - lo) <= abs(value - hi) else "верхнюю"
+        text = f"{LABELS[key]} = {value:.3g} упёрся в {side} границу допустимых значений ({lo:g} … {hi:g})."
+        if key == "n_emp":
+            text += (" n вне [1, 2] диффузия и рекомбинация в ОПЗ не дают: ток определяет другой механизм "
+                     "(туннелирование, утечка по поверхности, высокий уровень инжекции) — модель (6.3) "
+                     "неполна для этой ВАХ.")
+        else:
+            text += " Подгонка не нашла физического значения: данные требуют механизма, которого в модели нет."
+        notes.append(text)
+    loose = [LABELS[k] for k, v in result.stderr.items() if not np.isnan(v) and v > LOOSE_STDERR]
+    if loose:
+        notes.append("Данными почти не определяются (погрешность больше 100 %): " + ", ".join(loose)
+                     + ". Их значения условны — зафиксируйте известные параметры (галочка справа от поля) "
+                       "или добавьте данные (другой диапазон V, T).")
+    return notes
+
+
+def _consistency_notes(result, s):
+    """Согласованность найденных значений с физической моделью структуры."""
+    notes = []
+    p = result.params
+    if result.model == EMPIRICAL and "J0_emp" in p:
+        phys = replace(s, model=ph.MODEL_PHYSICAL)
+        try:
+            js = float(ph.saturation_current_density(phys, 0.0))
+        except (ValueError, ZeroDivisionError, FloatingPointError):
+            js = float("nan")
+        if np.isfinite(js) and js > 0:
+            ratio = p["J0_emp"] / js
+            if ratio > 100:
+                notes.append(f"J₀ = {p['J0_emp']:.3g} А/см² в {ratio:.3g} раз больше диффузионного J_s "
+                             f"= {js:.3g} А/см² структуры (4.3) при текущих N и τ: прямой ток — не диффузия "
+                             "(рекомбинация в ОПЗ, утечка) или времена жизни короче заданных.")
+            elif ratio < 0.01:
+                notes.append(f"J₀ = {p['J0_emp']:.3g} А/см² в {1 / ratio:.3g} раз меньше диффузионного J_s "
+                             f"= {js:.3g} А/см² структуры (4.3): проверьте площадь D, T и концентрации — "
+                             "меньше диффузионного предела ток идеального диода не бывает.")
+    Rs = p.get("Rs")
+    if Rs is not None and np.isfinite(Rs):
+        try:
+            rho_T = ph.resistivity(s.substrate[0], s.T, s.material)
+            r_sub = rho_T * s.d_sub / s.area
+        except (ValueError, ZeroDivisionError):
+            r_sub = float("nan")
+        if np.isfinite(r_sub) and Rs > 10 * r_sub and r_sub > 0:
+            notes.append(f"R_s = {Rs:.3g} Ом больше оценки сопротивления подложки ρ·d/A = {r_sub:.3g} Ом в "
+                         f"{Rs / r_sub:.0f} раз: основное сопротивление — контакты или растекание под "
+                         "кольцевым контактом [Кур74, с. 238].")
+    if result.model == PHYSICAL and "tau0_bg" in p and "tau_bg" in p:
+        if p["tau0_bg"] > 10 * p["tau_bg"]:
+            notes.append(f"τ₀^bg = {p['tau0_bg']:.3g} с больше τ^bg = {p['tau_bg']:.3g} с в "
+                         f"{p['tau0_bg'] / p['tau_bg']:.0f} раз, хотя обе величины задают одни и те же "
+                         "центры рекомбинации (5.9), (5.10): вероятно, ток ОПЗ занижает другой механизм "
+                         "или τ^bg описывает не объём, а границу.")
+    return notes
 
 def reverse_exponent(V, I, v_from=-1.0):
     """Показатель m в |I| ∝ |V|^m на обратной ветви при V < v_from (наклон
@@ -328,13 +468,22 @@ def reverse_exponent(V, I, v_from=-1.0):
     return float(np.polyfit(np.log(-V[sel]), np.log(-I[sel]), 1)[0])
 
 
-def forward_resistance_trend(V, I, parts=3):
-    """dV/dI по участкам верха прямой ветви (выше 40 % максимума V), Ом."""
+def forward_resistance_trend(V, I, parts=3, n=None, T=300.0):
+    """dV/dI по участкам верха прямой ветви (выше 40 % максимума V), Ом.
+
+    n — если задан, из dV/dI вычитается дифференциальное сопротивление самого
+    диода n·kT/(q·I) (из (6.3)): остаётся сопротивление последовательной цепи."""
     sel = (V > 0.4 * V.max()) & (I > 0)
     if sel.sum() < 3 * parts:
         return []
-    chunks = np.array_split(np.flatnonzero(sel), parts)
-    return [float(np.polyfit(I[c], V[c], 1)[0]) for c in chunks if c.size >= 3]
+    chunks = [c for c in np.array_split(np.flatnonzero(sel), parts) if c.size >= 3]
+    out = []
+    for c in chunks:
+        r = float(np.polyfit(I[c], V[c], 1)[0])
+        if n is not None:
+            r -= n * ph.thermal_voltage(T) / float(np.mean(I[c]))
+        out.append(r)
+    return out
 
 
 def explain(result, s):
@@ -351,21 +500,28 @@ def explain(result, s):
                          "в ОПЗ (∝ W ∝ √V) — ориентир для τ₀.")
         else:
             notes.append(f"Обратная ветвь почти линейна (|I| ∝ |V|^{m_data:.2f}): её задаёт шунт R_sh.")
-    trend = forward_resistance_trend(V, I)
-    if len(trend) >= 2:
+    # Сопротивление цепи = dV/dI минус сопротивление самого диода n·kT/(qI); n = 2 —
+    # наибольшее для (6.3), поэтому остаток — нижняя оценка R_s и не путает спад
+    # сопротивления диода с модуляцией.
+    n_diode = result.params.get("n_emp", 2.0)
+    trend = forward_resistance_trend(V, I, n=n_diode, T=s.T)
+    if len(trend) >= 2 and trend[0] > 0:
         change = (trend[-1] - trend[0]) / trend[0]
         text = " → ".join(f"{r:.0f}" for r in trend)
-        if change < -0.05:
-            notes.append(f"Верх прямой ветви: dV/dI падает с ростом тока ({text} Ом) быстрее, чем даёт сам "
-                         "диод. Так проявляется модуляция проводимости высокоомной базы "
-                         "инжектированными носителями — R_s(I) по (6.9).")
+        if change < -0.15:
+            notes.append(f"Верх прямой ветви: сопротивление цепи (dV/dI минус n·kT/qI диода, n = "
+                         f"{n_diode:.2g}) падает с ростом тока: {text} Ом. Так проявляется модуляция "
+                         "проводимости высокоомной базы инжектированными носителями — R_s(I) по (6.9).")
         else:
-            notes.append(f"Верх прямой ветви: dV/dI ≈ {text} Ом — последовательное сопротивление почти "
-                         "постоянно.")
+            notes.append(f"Верх прямой ветви: сопротивление цепи (dV/dI минус n·kT/qI диода) ≈ {text} Ом — "
+                         "последовательное сопротивление почти постоянно.")
     for cand in result.candidates:
         name = ", ".join(TERMS[t][0] for t in cand.terms) or "минимальная модель"
         mark = "выбрана" if cand.accepted else "отклонена"
         notes.append(f"Вариант «{name}»: ошибка {100 * cand.error:.2f} %, BIC = {cand.bic:.0f} — {mark}.")
+    notes += _selection_notes(result)
+    notes += _quality_notes(result)
+    notes += _consistency_notes(result, s)
     p = result.params
     if TERM_LEAK in result.terms:
         m = p["m_leak"]

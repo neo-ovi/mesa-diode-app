@@ -988,7 +988,8 @@ class MesaApp(tk.Tk):
                 text, error = ("выкл." if key in ("I_L", "I_mod") else _fmt(value)), ""
             else:
                 text = f"{value:.4g}"
-                error = "" if not np.isfinite(sigma) else (f"{100 * sigma:.1f} %" if log_scale else f"{sigma:.2g}")
+                error = ("не опр." if sigma == float("inf") else "" if not np.isfinite(sigma)
+                         else (f"{100 * sigma:.1f} %" if log_scale else f"{sigma:.2g}"))
             self.fit_table.insert("", "end", text=fitting.LABELS[key],
                                   values=(text, error, fitting.UNITS[key]))
         model = "эмпирическая (6.3)" if result.model == fitting.EMPIRICAL else "физическая (§4–§6)"

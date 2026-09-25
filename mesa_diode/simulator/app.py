@@ -33,7 +33,7 @@ from mesa_diode.simulator import formulas as formulas_module
 from mesa_diode.simulator import help as help_module
 from mesa_diode.simulator import hints
 from mesa_diode.simulator.widgets import Tooltip, bind_wheel, format_value, wheel_step
-from mesa_diode.simulator.io import load_xy_file
+from mesa_diode.simulator import datafile
 from mesa_diode.simulator.diagram import draw_mesa_diagram
 from mesa_diode.simulator.plot_utils import (
     adaptive_point_count, adaptive_voltage_range, auto_scale, robust_value_limits,
@@ -192,6 +192,7 @@ class MesaApp(tk.Tk):
         data_menu = tk.Menu(menubar, tearoff=0)
         data_menu.add_command(label="Загрузить эксперим. ВАХ (файл)...", command=self.load_experimental_iv)
         data_menu.add_command(label="Загрузить эксперим. ВФХ (файл)...", command=self.load_experimental_cv)
+        data_menu.add_command(label="Формат файлов данных и примеры", command=self.show_data_format)
         data_menu.add_separator()
         data_menu.add_command(label="Очистить экспериментальные данные", command=self.clear_experimental)
         menubar.add_cascade(label="Данные", menu=data_menu)
@@ -203,6 +204,7 @@ class MesaApp(tk.Tk):
         menubar.add_cascade(label="Наборы", menu=sets_menu)
         self.help_menu = tk.Menu(menubar, tearoff=0)
         self.help_menu.add_command(label="Формулы и параметры", command=self.open_formulas_window)
+        self.help_menu.add_command(label="Формат файлов данных", command=self.show_data_format)
         self.help_menu.add_separator()
         self.help_menu.add_command(label="Методичка (PDF)",
                                    command=lambda: help_module.open_metodichka(self, "pdf"))
@@ -215,8 +217,10 @@ class MesaApp(tk.Tk):
         bar = ttk.Frame(self, padding=(6, 6, 6, 0))
         bar.pack(side=tk.TOP, fill=tk.X)
         groups = (
-            (("Загрузить ВАХ", self.load_experimental_iv, "Файл: два столбца V, I (вольты, амперы)."),
-             ("Загрузить ВФХ", self.load_experimental_cv, "Файл: два столбца V, C (вольты, фарады)."),
+            (("Загрузить ВАХ", self.load_experimental_iv, "CSV, TXT или Excel: столбцы V, I (вольты, "
+              "амперы; другие единицы — подписью в заголовке). Формат — «Данные → Формат файлов»."),
+             ("Загрузить ВФХ", self.load_experimental_cv, "CSV, TXT или Excel: столбцы V, C (вольты, "
+              "фарады; другие единицы — подписью в заголовке). Формат — «Данные → Формат файлов»."),
              ("Очистить данные", self.clear_experimental, "Убрать загруженные ВАХ и ВФХ.")),
             (("Сохранить набор", self.save_preset, "Все поля, файлы измерений и метаданные — в JSON."),
              ("Загрузить набор", self.load_preset, "Открыть сохранённый набор образца."),
@@ -608,18 +612,16 @@ class MesaApp(tk.Tk):
 
     def _load_preset_files(self, preset):
         self.exp_iv, self.exp_cv = [], []
-        missing = []
+        problems = []
         for kind, target in (("iv", self.exp_iv), ("cv", self.exp_cv)):
             for path in preset.resolved_files(kind)[:MAX_DATASETS]:
-                try:
-                    voltage, value = load_xy_file(path)
-                except (OSError, ValueError):
-                    missing.append(str(path))
-                    continue
-                target.append({"label": Path(path).name, "path": str(path),
-                               "voltage": voltage, "value": value})
-        if missing:
-            messagebox.showwarning("Файлы набора", "Не удалось загрузить:\n" + "\n".join(missing))
+                report = datafile.analyze(path, kind)
+                if report.errors or report.warnings:
+                    problems.append(f"{Path(path).name}:\n" + report.text(("error", "warning")))
+                if report.ok:
+                    target.append(self._dataset(path, report))
+        if problems:
+            messagebox.showwarning("Файлы набора", "\n\n".join(problems))
 
     def save_preset(self):
         try:
@@ -935,21 +937,33 @@ class MesaApp(tk.Tk):
         self._set_fit_text(head + "\n".join("• " + note for note in result.notes))
 
     # --------------------------------------------- экспериментальные данные
-    def _load_experimental_files(self, dialog_title, target_list, error_title):
-        paths = filedialog.askopenfilenames(
-            title=dialog_title, filetypes=[("Текст/CSV", "*.csv;*.txt;*.dat"), ("Все файлы", "*.*")])
+    @staticmethod
+    def _dataset(path, report):
+        return {"label": Path(path).name, "path": str(path), "voltage": report.voltage,
+                "value": report.value, "report": report}
+
+    def _load_experimental_files(self, dialog_title, target_list, error_title, kind):
+        paths = filedialog.askopenfilenames(title=dialog_title, filetypes=datafile.FILE_TYPES)
         if not paths:
             return
         slots = remaining_slots(len(target_list))
         accepted, rejected = paths[:slots], paths[slots:]
         for path in accepted:
             try:
-                voltage, value = load_xy_file(path)
-            except Exception as e:
-                messagebox.showerror(error_title, f"{Path(path).name}: {e}")
+                report = datafile.analyze(path, kind)
+            except Exception as e:  # непредвиденный сбой чтения — сообщить, не падать
+                messagebox.showerror(error_title, f"{Path(path).name}: {e}\n"
+                                     f"Подробнее: методичка, {datafile.REF}.")
                 continue
-            target_list.append({"label": Path(path).name, "path": path,
-                                "voltage": voltage, "value": value})
+            if not report.ok:
+                messagebox.showerror(error_title, f"{Path(path).name} не загружен.\n\n"
+                                     + report.text(("error", "warning")))
+                continue
+            if report.warnings:
+                messagebox.showwarning(error_title.replace("Ошибка", "Проверка"),
+                                       f"{Path(path).name} загружен, но проверьте данные.\n\n"
+                                       + report.text(("warning", "info")))
+            target_list.append(self._dataset(path, report))
         if target_list is self.exp_iv and accepted:
             self._take_from_iv = True
         if rejected:
@@ -960,10 +974,50 @@ class MesaApp(tk.Tk):
         self.recompute()
 
     def load_experimental_iv(self):
-        self._load_experimental_files("Файлы экспериментальной ВАХ (V, I)", self.exp_iv, "Ошибка загрузки ВАХ")
+        self._load_experimental_files("Файлы экспериментальной ВАХ (V, I)", self.exp_iv,
+                                      "Ошибка загрузки ВАХ", datafile.KIND_IV)
 
     def load_experimental_cv(self):
-        self._load_experimental_files("Файлы экспериментальной ВФХ (V, C)", self.exp_cv, "Ошибка загрузки ВФХ")
+        self._load_experimental_files("Файлы экспериментальной ВФХ (V, C)", self.exp_cv,
+                                      "Ошибка загрузки ВФХ", datafile.KIND_CV)
+
+    def show_data_format(self):
+        """Окно «Формат файлов данных»: описание и открытие каталога примеров."""
+        window = tk.Toplevel(self)
+        window.title("Формат файлов данных")
+        text = tk.Text(window, wrap="word", width=78, height=34, font=FONT, relief="flat")
+        text.insert("end", datafile.FORMAT_HELP + f"\nПодробнее: методичка, {datafile.REF}.\n\n"
+                    "Примеры (синтетические данные):\n"
+                    + "\n".join(f"  {name}" for name in datafile.example_files()))
+        text.configure(state="disabled")
+        buttons = ttk.Frame(window, padding=(8, 0, 8, 8))
+        buttons.pack(side=tk.BOTTOM, fill=tk.X)
+        scroll = ttk.Scrollbar(window, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
+        text.pack(fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+        ttk.Button(buttons, text="Открыть каталог примеров",
+                   command=self._open_examples).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Проверить файл...", command=self.check_data_file).pack(side=tk.LEFT, padx=6)
+        ttk.Button(buttons, text="Закрыть", command=window.destroy).pack(side=tk.RIGHT)
+
+    def _open_examples(self):
+        error = help_module.open_with_system(datafile.EXAMPLES_DIR)
+        if error:
+            messagebox.showinfo("Примеры", f"Каталог примеров: {datafile.EXAMPLES_DIR}\n({error})")
+
+    def check_data_file(self):
+        """Разбор файла без загрузки: все замечания, включая «сделано»."""
+        path = filedialog.askopenfilename(title="Проверить файл данных", filetypes=datafile.FILE_TYPES)
+        if not path:
+            return
+        kind = datafile.KIND_CV if messagebox.askyesno(
+            "Проверить файл", "Это ВФХ (ёмкость)?\n«Нет» — ВАХ (ток).") else datafile.KIND_IV
+        report = datafile.analyze(path, kind)
+        head = (f"{Path(path).name}: {len(report.voltage)} точек, V от {report.voltage.min():.3g} до "
+                f"{report.voltage.max():.3g} В." if report.ok else f"{Path(path).name} не загрузится.")
+        body = report.text() or "Замечаний нет."
+        (messagebox.showinfo if report.ok else messagebox.showerror)("Проверка файла", head + "\n\n" + body)
 
     def clear_experimental(self):
         self.exp_iv, self.exp_cv = [], []
@@ -1119,6 +1173,10 @@ class MesaApp(tk.Tk):
         if self.deviation is not None:
             parts.append(f"отклонение от ВАХ δ = {100 * self.deviation[2]:.2f} %")
         warnings = list(self.reference_data.warnings) if self.reference_data else []
+        for data in self.exp_iv + self.exp_cv:
+            report = data.get("report")
+            warnings += [f"{data['label']}: {issue.text} {issue.hint} (методичка, {issue.ref})"
+                         for issue in (report.warnings if report else [])]
         count = len(warnings)
         self.warnings_text.configure(state="normal")
         self.warnings_text.delete("1.0", "end")

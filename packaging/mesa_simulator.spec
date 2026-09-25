@@ -18,9 +18,11 @@ a = Analysis(
     [str(project_root / "scripts" / "run_simulator.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    # примеры файлов данных (Данные → Формат файлов данных)
+    datas=[(str(project_root / "mesa_diode" / "simulator" / "examples"), "mesa_diode/simulator/examples")],
     hiddenimports=[
         "matplotlib.backends.backend_tkagg",
+        "openpyxl",
     ],
     hookspath=[],
     hooksconfig={},

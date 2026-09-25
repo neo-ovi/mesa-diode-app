@@ -170,7 +170,10 @@ def test_scenario_mapping():
     b = a.with_scenario(ph.SCENARIO_B)
     assert (b.n_side.layer, b.p_side.layer) == ("i", "sub")
     assert b.z_j == pytest.approx(3.2 * UM)
-    assert b.n_side.boundary == ph.REFLECT
+    assert b.n_side.boundary == ph.REFLECT and b.n_side.neighbour.layer == "n+"   # умолчание ТЗ
+    assert a.p_side.neighbour.layer == "sub"
+    ui = presets.to_structure({"i_type": presets.I_TYPE_N})                      # умолчание окна
+    assert ui.n_side.boundary == ph.LAYER
     assert rel(ph.resistivity(b.p_side.N, 300.0), 5.0, 1e-6)
 
 
@@ -576,3 +579,45 @@ def test_ideality_failure_text_links_rs_and_gives_solution():
     short, text = hints.ideality_failure_text("a.csv", ["окно мало"], 10.0, 123.0, found=False)
     assert "окно мало" in text and "V₁ … V₂" in text
     assert hints.ideality_failure_text("a.csv", [], 10.0, 123.0, found=True) == ("", "")
+
+
+# ------------------------------------- 3.3: граница «соседний слой» (4.3а) --
+
+def test_finite_velocity_boundary_limits():
+    u = np.array([1e-3, 0.5, 3.0])
+    assert np.allclose(ph.boundary_factor(u, ph.SINK, r=1e12), 1.0 / np.tanh(u), rtol=1e-6)
+    assert np.allclose(ph.boundary_factor(u, ph.LAYER, r=0.0), np.tanh(u), rtol=1e-12)
+    assert ph.boundary_factor(np.array([1e-9]), ph.LAYER, r=7.0)[0] == pytest.approx(7.0, rel=1e-6)
+
+
+def test_layer_boundary_between_sink_and_reflect():
+    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 3e16, "ND_plus": 1e19}
+    parts = {bc: ph.saturation_current_density_parts(presets.to_structure({**base, "bc_B_n": bc}), 0.0)[0]
+             for bc in (ph.SINK, ph.REFLECT, ph.LAYER)}
+    assert parts[ph.REFLECT] < parts[ph.LAYER] < parts[ph.SINK]
+    # более слабо легированный n⁺ «отражает» хуже → ток дырок больше
+    weak = ph.saturation_current_density_parts(presets.to_structure({**base, "ND_plus": 1e17}), 0.0)[0]
+    assert weak > parts[ph.LAYER]
+
+
+def test_punch_through_current_stays_finite():
+    """Смыкание ОПЗ с границей i/подложка (сценарий A, N_i = 10¹⁴): ток — поток в подложку, не ∝ 1/w."""
+    s = presets.to_structure({"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "N_i": 1e14,
+                              "ND_plus": 1e17})
+    assert ph.neutral_widths(s, -3.0)[2]
+    assert abs(ph.solve_iv(s, np.array([-3.0])).I[0]) < 1e-3
+
+
+def test_iv_depends_on_weakly_doped_side():
+    """Физическая модель: ток задаёт слабо легированная сторона (§6.8 методички)."""
+    V = np.array([-1.0, 0.15])
+
+    def current(**changes):
+        params = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "rho_sub": 40.0, **changes}
+        return ph.solve_iv(presets.to_structure(params), V).I
+
+    assert abs(current(N_i=2.9e14)[0]) > 5 * abs(current(N_i=2.9e17)[0])      # A: N_i важна
+    assert current(ND_plus=1e17)[0] != current(ND_plus=1e20)[0]
+    empirical = {"mode": presets.MODE_BASIC}
+    same = [ph.solve_iv(presets.to_structure({**empirical, "N_i": n}), V).I for n in (1e14, 1e17)]
+    assert np.allclose(same[0], same[1])                                       # базовая: по построению

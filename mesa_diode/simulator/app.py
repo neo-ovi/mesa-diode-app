@@ -305,6 +305,12 @@ class MesaApp(tk.Tk):
             for row_index, key in enumerate(keys):
                 self._param_row(section.body, row_index, key)
             extra = len(keys)
+            if "N_i" in keys:
+                self.doping_note = ttk.Label(section.body, text=hints.plain(hints.BASIC_DOPING_NOTE),
+                                             foreground="#555555", font=FONT,
+                                             wraplength=SIDEBAR_WIDTH - 50, justify="left")
+                self.doping_note.grid(row=extra, column=0, columnspan=4, sticky="w", pady=(2, 0))
+                Tooltip(self.doping_note, hints.plain(hints.with_reference(hints.BASIC_DOPING_NOTE, "sensitivity")))
             if "d_sub_um" in keys:
                 self.d_i_label = ttk.Label(section.body, text="", foreground="#555555", font=FONT)
                 self.d_i_label.grid(row=extra, column=0, columnspan=3, sticky="w")
@@ -777,6 +783,7 @@ class MesaApp(tk.Tk):
             else:
                 section.pack_forget()
         physical = mode != presets.MODE_BASIC
+        self.doping_note.grid() if not physical else self.doping_note.grid_remove()
         for scenario, fields in BOUNDARY_FIELDS.items():
             for key, _label in fields:
                 state = ["!disabled"] if physical and scenario in scenarios else ["disabled"]

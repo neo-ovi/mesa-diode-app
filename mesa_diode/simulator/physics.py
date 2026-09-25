@@ -175,8 +175,8 @@ SCENARIO_A = "A"   # i-слой p: переход n⁺/i на глубине d_n
 SCENARIO_B = "B"   # i-слой n (по умолчанию): переход i/подложка на дне мезы
 SCENARIOS = (SCENARIO_A, SCENARIO_B)
 
-SINK, REFLECT, LONG = "sink", "reflect", "long"
-BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "длинная база"}
+SINK, REFLECT, LONG, LAYER = "sink", "reflect", "long", "layer"
+BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "длинная база", LAYER: "соседний слой"}
 
 MODEL_PHYSICAL = "physical"     # физическая модель §2–§6
 MODEL_EMPIRICAL = "empirical"   # эмпирическая модель (6.3): J₀ и n задаются (базовый режим)
@@ -197,6 +197,7 @@ class Side:
     tau_bg: float        # фоновое время жизни неосновных, с
     sigma_R: float       # рекомбинационная эффективность дислокации, см²/с
     boundary: str        # граничное условие на дальней границе
+    neighbour: object = None   # слой того же типа за дальней границей (Side) или None — контакт
 
 
 @dataclass(frozen=True)
@@ -236,7 +237,7 @@ class Structure:
     I_L: float = 0.0
     m_leak: float = 3.0
     bc_A_n: str = SINK
-    bc_A_p: str = SINK
+    bc_A_p: str = SINK                # умолчания ТЗ (эталоны §9); в окне по умолчанию LAYER
     bc_B_n: str = REFLECT
     bc_B_p: str = SINK
     sns_refinement: bool = False
@@ -286,14 +287,18 @@ class Structure:
         if self.scenario == SCENARIO_A:
             return Side("n", "n+", self.ND_plus, self.d_n, self.mu_p_nplus,
                         self.tau_p_bg, self.sigma_R_epi, self.bc_A_n)
+        nplus = Side("n", "n+", self.ND_plus, self.d_n, self.mu_p_nplus,
+                     self.tau_p_bg, self.sigma_R_epi, SINK)          # за ним верхний контакт
         return Side("n", "i", self.N_i, self.d_i, self.mu_p_i,
-                    self.tau_p_bg, self.sigma_R_epi, self.bc_B_n)
+                    self.tau_p_bg, self.sigma_R_epi, self.bc_B_n, nplus)
 
     @cached_property
     def p_side(self):
         if self.scenario == SCENARIO_A:
+            sub = Side("p", "sub", self.substrate[0], self.d_sub, self.mu_n,
+                       self.tau_n_bg, self.sigma_R_sub, SINK)        # за ней тыльный контакт
             return Side("p", "i", self.N_i, self.d_i, self.mu_n,
-                        self.tau_n_bg, self.sigma_R_epi, self.bc_A_p)
+                        self.tau_n_bg, self.sigma_R_epi, self.bc_A_p, sub)
         return Side("p", "sub", self.substrate[0], self.d_sub, self.mu_n,
                     self.tau_n_bg, self.sigma_R_sub, self.bc_B_p)
 
@@ -467,16 +472,24 @@ U_SMALL = 1e-6    # при u < 10⁻⁶: coth u = 1/u, tanh u = u
 U_LARGE = 20.0    # при u > 20: f = 1
 
 
-def boundary_factor(u, boundary):
+def boundary_factor(u, boundary, r=float("inf")):
     """f(w/L) в (4.3): 1 — длинная база [Зи, ур. (40)]; coth — «сток»,
     Δn(w) = 0 [Ш49, с. 470, ур. (5.5)]; tanh — «отражение», dΔn/dx(w) = 0
-    [Ш49, с. 470, ур. (5.6) при p₁ = p₂]."""
+    [Ш49, с. 470, ур. (5.6) при p₁ = p₂].
+
+    r = S·L/D — «сток» с конечной скоростью отвода носителей S на границе,
+    −D·dΔn/dx = S·Δn (4.3а): f = (r + tanh u)/(r·tanh u + 1). При r → ∞ это
+    coth u, при r = 0 — tanh u; при u → 0 f → r, и ток ограничен потоком
+    q·n₀·S, а не растёт как 1/w (смыкание ОПЗ с границей слоя)."""
     u = np.asarray(u, dtype=float)
     if boundary == LONG:
         return np.ones_like(u)
     small = u < U_SMALL
     safe = np.where(small, U_SMALL, u)
-    if boundary == SINK:
+    if boundary in (SINK, LAYER) and np.isfinite(r):
+        t = np.where(small, u, np.tanh(safe))
+        f = (r + t) / (r * t + 1.0)
+    elif boundary in (SINK, LAYER):
         f = np.where(small, 1.0 / np.maximum(u, 1e-300), 1.0 / np.tanh(safe))
     elif boundary == REFLECT:
         f = np.where(small, u, np.tanh(safe))
@@ -505,6 +518,27 @@ def minority_transport(s):
     return (Dp, Lp), (Dn, Ln)
 
 
+def boundary_velocity(s, side, minority0, vth):
+    """Скорость отвода неосновных носителей S на дальней границе базы, см/с (4.3а).
+
+    «Сток» — идеальный, S = ∞ (как в эталонах ТЗ §9).
+    «Соседний слой» того же типа (изотипная граница i/n⁺, i/подложка):
+    квазиуровень Ферми неосновных непрерывен через границу — то же условие,
+    что (4.1) на краю ОПЗ [Зи, с. 92, ур. (28)], — поэтому Δn₂/n₂₀ = Δn₁/n₁₀,
+    и поток в соседний слой по (4.3) даёт S = (D₂/L₂)·(n₂₀/n₁₀)·f₂(w₂/L₂)
+    (вывод); f₂ — сток к контакту за соседним слоем. Сильнее легированный
+    сосед (n₂₀ ≪ n₁₀) почти «отражает», слабее — почти «сток». Последовательно
+    с тепловым ограничением (оценка): 1/S = 1/S₂ + 1/v_th. Без соседа — ∞."""
+    if side.boundary == LAYER and side.neighbour is not None:
+        nb = side.neighbour
+        D2 = diffusion_coefficient(nb.mu_minority, s.T)
+        L2 = diffusion_length(D2, minority_lifetime(nb, s.N_dis))
+        minority2 = equilibrium_carriers(nb.N, s.ni)[1]
+        S = D2 / L2 * minority2 / minority0 * float(boundary_factor(nb.thickness / L2, SINK))
+        return 1.0 / (1.0 / max(S, 1e-300) + 1.0 / vth)
+    return float("inf")
+
+
 def saturation_current_density_parts(s, V):
     """(4.3) Слагаемые J_s(V): дырки в n-области и электроны в p-области, А/см².
 
@@ -516,8 +550,10 @@ def saturation_current_density_parts(s, V):
     (Dp, Lp), (Dn, Ln) = minority_transport(s)
     p_n0, n_p0 = s.minority
     wn, wp, _ = neutral_widths(s, V)
-    holes = Q * Dp * p_n0 / Lp * boundary_factor(wn / Lp, s.n_side.boundary)
-    electrons = Q * Dn * n_p0 / Ln * boundary_factor(wp / Ln, s.p_side.boundary)
+    r_p = boundary_velocity(s, s.n_side, p_n0, s.material.vth_p) * Lp / Dp
+    r_n = boundary_velocity(s, s.p_side, n_p0, s.material.vth_n) * Ln / Dn
+    holes = Q * Dp * p_n0 / Lp * boundary_factor(wn / Lp, s.n_side.boundary, r_p)
+    electrons = Q * Dn * n_p0 / Ln * boundary_factor(wp / Ln, s.p_side.boundary, r_n)
     return holes, electrons
 
 

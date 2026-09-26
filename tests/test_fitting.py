@@ -10,7 +10,8 @@ from mesa_diode.simulator import physics as ph
 
 
 def _empirical(**changes):
-    params = {**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC, "D_um": 500.0,
+    params = {**presets.DEFAULT_PARAMS, "mode": presets.MODE_EXTENDED, "extended_model": ph.MODEL_EMPIRICAL,
+              "D_um": 500.0,
               "J0_emp": 2e-2, "n_emp": 1.4, "Rs": 150.0, "Rsh": 2e4, "I_L": 2e-5,
               "m_leak": 2.5, "I_mod": 0.1, **changes}
     return presets.to_structure(params)
@@ -92,7 +93,8 @@ def test_measured_iv_is_described_within_one_percent(validation_preset):
         pytest.skip("ВАХ образца недоступна: задайте MESA_DATA_DIR")
     from mesa_diode.simulator.io import load_xy_file
     V, I = load_xy_file(files[0])
-    s = presets.to_structure({**validation_preset.params, "mode": presets.MODE_BASIC})
+    s = presets.to_structure({**validation_preset.params, "mode": presets.MODE_EXTENDED,
+                              "extended_model": ph.MODEL_EMPIRICAL})
     r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
     assert fitting.TERM_LEAK in r.terms and r.error <= fitting.TARGET_ERROR
     strict = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, target=0.0)
@@ -134,6 +136,19 @@ def test_fittable_fields():
     phys = fitting.fittable_fields(fitting.PHYSICAL)
     assert {"tau0_bg", "tau_n_bg", "tau_p_bg"} <= phys and "n_emp" not in phys
     assert "rho_sub" in presets.editable_keys(presets.MODE_BASIC)
+
+
+def test_basic_mode_fits_only_simple_diode():
+    """Базовый режим: простой диод с R_s и R_sh — механизмы не подключаются."""
+    V, I = _synthetic(_empirical(), noise=0.002)                  # данные с утечкой и модуляцией
+    basic = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC})
+    assert basic.I_L == 0 and basic.I_mod == float("inf")
+    r = fitting.fit_iv(basic, V, I, fitting.EMPIRICAL, terms=presets.MODE_TERMS[presets.MODE_BASIC])
+    assert r.terms == () and len(r.candidates) == 1 and r.allowed_terms == ()
+    assert r.params["I_L"] == 0 and {"J0_emp", "n_emp", "Rs", "Rsh"} <= set(r.params)
+    assert any("Базовая модель" in n for n in r.notes)
+    assert any("«Расширенная»" in n for n in r.notes)
+    assert fitting.fittable_fields(fitting.EMPIRICAL, ()) == {"J0_emp", "n_emp", "Rs", "Rsh"}
 
 
 def test_simplest_adequate_variant_is_chosen():

@@ -12,7 +12,8 @@ from mesa_diode.simulator import physics as ph
 
 def test_builtin_models_registered():
     assert {ph.MODEL_EMPIRICAL, ph.MODEL_TWO_DIODE, ph.MODEL_PHYSICAL} <= set(models.MODELS)
-    assert [m.key for m in models.basic_models()] == [ph.MODEL_EMPIRICAL, ph.MODEL_TWO_DIODE]
+    assert [m.key for m in models.selectable_models()] == [ph.MODEL_EMPIRICAL, ph.MODEL_TWO_DIODE,
+                                                            ph.MODEL_PHYSICAL]
     for m in models.MODELS.values():
         s = presets.to_structure({"mode": presets.MODE_FIT})
         parts = m.parts(replace(s, model=m.key), np.array([-0.5, 0.2]))
@@ -23,7 +24,7 @@ def test_builtin_models_registered():
 
 
 def test_two_diode_equals_sze_55_sum():
-    s = presets.to_structure({"mode": presets.MODE_BASIC, "basic_model": ph.MODEL_TWO_DIODE,
+    s = presets.to_structure({"mode": presets.MODE_EXTENDED, "extended_model": ph.MODEL_TWO_DIODE,
                               "J01_2d": 1e-8, "J02_2d": 1e-6})
     V = np.array([0.3])
     parts = ph.components(s, V)
@@ -33,11 +34,11 @@ def test_two_diode_equals_sze_55_sum():
 
 
 def test_two_diode_fit_recovers_parameters():
-    true = presets.to_structure({"mode": presets.MODE_BASIC, "basic_model": ph.MODEL_TWO_DIODE,
+    true = presets.to_structure({"mode": presets.MODE_EXTENDED, "extended_model": ph.MODEL_TWO_DIODE,
                                  "J01_2d": 3e-8, "J02_2d": 2e-5, "Rs": 40.0, "Rsh": 2e5})
     V = np.linspace(-3, 1, 300)
     I = ph.solve_iv(true, V).I * (1 + 0.003 * np.random.default_rng(1).standard_normal(V.size))
-    start = presets.to_structure({"mode": presets.MODE_BASIC, "basic_model": ph.MODEL_TWO_DIODE})
+    start = presets.to_structure({"mode": presets.MODE_EXTENDED, "extended_model": ph.MODEL_TWO_DIODE})
     r = fitting.fit_iv(start, V, I, fitting.TWO_DIODE)
     assert r.error < 0.01
     assert r.params["J01_2d"] == pytest.approx(3e-8, rel=0.1)

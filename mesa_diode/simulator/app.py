@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Основное окно симулятора мезадиода Ge (ТЗ §8; компоновка — версия 3.2).
+"""Основное окно симулятора мезадиода Ge (компоновка — версия 3.6).
 
-Компоновка по порядку работы: слева — шаги (1. режим, 2. образец,
-3. параметры — только используемые в режиме, 4. расчёт и подгонка);
-справа — графики и вкладки результатов (подгонка и отклонения модели от
-ВАХ, идеальность, предупреждения, схема мезы); внизу — строка статуса.
-Всё справочное — в окне «Формулы и параметры». Физика — simulator/physics.py,
-автоподгонка — simulator/fitting.py, наборы образцов — simulator/presets.py.
+Слева направо — как идёт работа (методичка, п. 1А.0): сверху — режим
+(базовая, расширенная, подгонка); слева — параметры режима и кнопки
+расчёта; в центре — один большой график с вкладками (ВАХ, ВФХ и 1/C²,
+плотность тока) и под ним результаты; справа — эквивалентная схема модели,
+её формула и расчёт точки вручную (scheme_panel). Обучение — tutorial.py.
+Физика — simulator/physics/, автоподгонка — simulator/fitting.py, наборы
+образцов — simulator/presets.py.
 
 Запуск:        python scripts/run_simulator.py
 Сборка в exe:  см. mesa_diode/simulator/README.md
@@ -37,6 +38,8 @@ from mesa_diode.simulator.widgets import Tooltip, bind_wheel, format_value, whee
 from mesa_diode.simulator import datafile
 from mesa_diode.simulator.defects_window import open_defects_window
 from mesa_diode.simulator.diagram import draw_mesa_diagram
+from mesa_diode.simulator.scheme_panel import SchemePanel
+from mesa_diode.simulator import tutorial
 from mesa_diode.simulator.plot_utils import (
     adaptive_point_count, adaptive_voltage_range, auto_scale, robust_value_limits,
 )
@@ -46,7 +49,7 @@ UM = 1e-4
 SCENARIO_COLORS = {ph.SCENARIO_A: "#1f4fb2", ph.SCENARIO_B: "#c0392b"}
 SINGLE_COLOR = "#1f6fb2"
 COMPONENT_STYLE = {
-    "emp": ("I_emp (6.3)", "#17becf"),
+    "emp": ("I_диод (6.3)", "#17becf"),
     "d1": ("I_01 (n = 1)", "#2ca02c"),
     "d2": ("I_02 (n = 2)", "#ff7f0e"),
     "diff": ("I_diff", "#2ca02c"),
@@ -60,7 +63,8 @@ FONT = ("Segoe UI", 9)
 # Разделы боковой панели по порядку работы: (заголовок, ключи) — hints.FIELD_GROUPS.
 SIDEBAR_GROUPS = [(title, keys) for title, keys, _about in hints.FIELD_GROUPS]
 BOUNDARY_TITLE = "Граничные условия и опции"
-SIDEBAR_WIDTH = 400
+SIDEBAR_WIDTH = 380
+GRAPH_TABS = (("iv", "ВАХ"), ("cv", "ВФХ и 1/C²"), ("jv", "Плотность тока |J|–V"))
 # Короткие подписи в основном окне; полные — в таблице параметров окна формул.
 SHORT_LABELS = {
     "D_um": "D (мезы)", "D_inner_um": "d кольца (окно)", "d_epi_um": "d_epi",
@@ -79,10 +83,10 @@ SHORT_LABELS = {
 }
 # Подписи кривых для галочек: (график, ключ, подпись).
 CURVES = {
-    "iv": [("total", "модель"), ("emp", "I_emp"), ("d1", "I_01"), ("d2", "I_02"), ("diff", "I_diff"), ("gr", "I_gr"),
+    "iv": [("total", "модель"), ("emp", "I_диод"), ("d1", "I_01"), ("d2", "I_02"), ("diff", "I_diff"), ("gr", "I_gr"),
            ("sh", "I_sh"), ("L", "I_L"), ("emp_fit", "(6.3) по n_эксп"), ("exp", "эксперимент")],
     "cv": [("model_C", "модель"), ("exp", "эксперимент"), ("fit_C", "прямые 1/C²")],
-    "jv": [("total", "|J| модели"), ("emp", "J_emp"), ("d1", "J_01"), ("d2", "J_02"), ("diff", "J_diff"), ("gr", "J_gr"),
+    "jv": [("total", "|J| модели"), ("emp", "J_диод"), ("d1", "J_01"), ("d2", "J_02"), ("diff", "J_diff"), ("gr", "J_gr"),
            ("sh", "J_sh"), ("L", "J_L"), ("Js0", "J_s(0)"), ("emp_fit", "(6.3) по n_эксп"),
            ("js_exp", "J(S) эксп."), ("n_exp", "n(V) эксп."), ("n_mod", "n(V) модели")],
 }
@@ -141,7 +145,7 @@ class MesaApp(tk.Tk):
         self.bc_vars = {key: tk.StringVar() for key in presets.CHOICE_FIELDS}
         self.flag_vars = {key: tk.BooleanVar() for key in presets.FLAG_FIELDS}
         self.mode = tk.StringVar(value=presets.MODE_BASIC)
-        self.basic_model = tk.StringVar(value=ph.MODEL_EMPIRICAL)   # модель тока базового режима
+        self.extended_model = tk.StringVar(value=presets.DEFAULT_EXTENDED_MODEL)   # «Модель тока»
         self.cv_view = tk.StringVar(value="C")
         self.curve_vars = {(plot, key): tk.BooleanVar(value=True)
                            for plot, curves in CURVES.items() for key, _label in curves}
@@ -171,17 +175,21 @@ class MesaApp(tk.Tk):
         self._fit_thread = None
         self._fit_progress = ""
         self.deviation = None        # (V, отклонение модели от эксперимента, δ)
+        self.tutorial_window = None  # tutorial.TutorialWindow, пока идёт обучение
 
         self._build_layout()
         self._apply_preset(self.preset)
         self.after(100, self.recompute)
+        if tutorial.should_autostart():
+            self.after(700, self.start_tutorial)
 
     # ------------------------------------------------------ компоновка окна
     def _build_layout(self):
-        """Окно: панель инструментов; слева — шаги работы (режим, образец,
-        поля, действия); справа — графики и вкладки результатов; внизу — статус."""
+        """Окно слева направо: параметры → график → схема и формула; сверху —
+        панель инструментов и режим; внизу — строка статуса."""
         self._build_menu()
         self._build_toolbar()
+        self._build_mode_bar()
         self.status_lbl = ttk.Label(self, text="", font=("Segoe UI", 9, "bold"), anchor="w",
                                     padding=(8, 3), relief="sunken")
         self.status_lbl.pack(side=tk.BOTTOM, fill=tk.X)
@@ -190,18 +198,53 @@ class MesaApp(tk.Tk):
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(4, 4))
         sidebar = ttk.Frame(paned)
-        right = ttk.PanedWindow(paned, orient=tk.VERTICAL)
+        center = ttk.PanedWindow(paned, orient=tk.VERTICAL)
+        right = ttk.Frame(paned)
         paned.add(sidebar, weight=0)
-        paned.add(right, weight=1)
+        paned.add(center, weight=1)
+        paned.add(right, weight=0)
         self._build_sidebar(sidebar)
-        plots = ttk.Frame(right)
-        results = ttk.Frame(right)
-        right.add(plots, weight=3)
-        right.add(results, weight=2)
-        self._build_figure_area(plots)
+        graphs = ttk.Frame(center)
+        results = ttk.Frame(center)
+        center.add(graphs, weight=3)
+        center.add(results, weight=2)
+        self._build_graph_tabs(graphs)
         self._build_results(results)
+        self.scheme = SchemePanel(right)
+        self.scheme.pack(fill=tk.BOTH, expand=True)
+        self.tutorial_targets.update(graph=self.graph_tabs, results=self.results_tabs, scheme=self.scheme,
+                                     load_iv=self.toolbar_buttons["Загрузить ВАХ"])
         ttk.Style(self).configure("Auto.TEntry", foreground=AUTO_COLOR)
         ttk.Style(self).configure("Section.TButton", anchor="w", font=("Segoe UI", 9, "bold"))
+        ttk.Style(self).configure("Mode.Toolbutton", font=("Segoe UI", 10, "bold"), padding=(12, 4))
+
+    def _build_mode_bar(self):
+        """Режим — главный переключатель: три «экрана» с одинаковой компоновкой."""
+        bar = ttk.Frame(self, padding=(6, 6, 6, 0))
+        bar.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(bar, text="Режим:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        self.mode_buttons = {}
+        for index, mode in enumerate(presets.MODES, 1):
+            button = ttk.Radiobutton(bar, text=f"{index}. {presets.MODE_LABELS[mode]}", value=mode,
+                                     variable=self.mode, command=self._on_mode_change, style="Mode.Toolbutton")
+            button.pack(side=tk.LEFT, padx=(0, 2))
+            Tooltip(button, hints.plain(hints.with_reference(hints.MODE_HINTS[mode], "modes")), wraplength=520)
+            self.mode_buttons[mode] = button
+        # Модель тока расширенного режима — из реестра models.
+        self.model_row = ttk.Frame(bar)
+        label = ttk.Label(self.model_row, text="Модель тока:", font=FONT)
+        label.pack(side=tk.LEFT, padx=(12, 0))
+        self._model_by_label = {m.label: m.key for m in models.selectable_models()}
+        self.model_box = ttk.Combobox(self.model_row, state="readonly", width=22,
+                                      values=list(self._model_by_label))
+        self.model_box.pack(side=tk.LEFT, padx=(4, 0))
+        self.model_box.bind("<<ComboboxSelected>>", self._on_current_model)
+        tip = hints.plain(hints.with_reference(hints.CURRENT_MODEL_HINT, "current_model"))
+        for widget in (label, self.model_box):
+            Tooltip(widget, tip, wraplength=520)
+        self.mode_lbl = ttk.Label(bar, text="", foreground="#444444", font=FONT)
+        self.mode_lbl.pack(side=tk.LEFT, padx=(12, 0))
+        self.tutorial_targets = {"mode_bar": bar}
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -221,6 +264,7 @@ class MesaApp(tk.Tk):
         sets_menu.add_command(label="Новый образец (пустые поля)", command=self.new_sample)
         menubar.add_cascade(label="Наборы", menu=sets_menu)
         self.help_menu = tk.Menu(menubar, tearoff=0)
+        self.help_menu.add_command(label="Обучение: первое моделирование", command=self.start_tutorial)
         self.help_menu.add_command(label="Формулы и параметры", command=self.open_formulas_window)
         self.help_menu.add_command(label="Формат файлов данных", command=self.show_data_format)
         self.help_menu.add_separator()
@@ -232,6 +276,7 @@ class MesaApp(tk.Tk):
         self.config(menu=menubar)
 
     def _build_toolbar(self):
+        self.toolbar_buttons = {}
         bar = ttk.Frame(self, padding=(6, 6, 6, 0))
         bar.pack(side=tk.TOP, fill=tk.X)
         groups = (
@@ -247,7 +292,9 @@ class MesaApp(tk.Tk):
              ("Опорный", self.reset_to_reference, "Модельная структура (методичка, п. 2.7): не образец, "
               "пример для проверки и обучения."),
              ("Новый образец", self.new_sample, "Все поля пустые, режим «Расширенная модель».")),
-            (("Формулы и параметры", self.open_formulas_window, "Что означает каждый параметр, формулы "
+            (("Обучение", self.start_tutorial, "Пошаговое обучение: первое моделирование на модельном "
+              "образце в базовом режиме (2–3 минуты)."),
+             ("Формулы и параметры", self.open_formulas_window, "Что означает каждый параметр, формулы "
               "модели и справочные величины."),
              ("Методичка", lambda: help_module.open_metodichka(self, "pdf"), "Открыть методичку (PDF).")),
         )
@@ -258,11 +305,16 @@ class MesaApp(tk.Tk):
                 button = ttk.Button(bar, text=text, command=command)
                 button.pack(side=tk.LEFT, padx=(0, 4))
                 Tooltip(button, tip)
+                self.toolbar_buttons[text] = button
         self.preset_label = ttk.Label(bar, text="", foreground="#555555")
         self.preset_label.pack(side=tk.LEFT, padx=(14, 0))
 
     # ----------------------------------------------------- боковая панель
     def _build_sidebar(self, parent):
+        """Слева: образец и параметры режима (прокрутка), внизу — кнопки расчёта."""
+        actions = ttk.Frame(parent, padding=(4, 6, 8, 4))
+        actions.pack(side=tk.BOTTOM, fill=tk.X)
+        self._build_actions(actions)
         canvas = tk.Canvas(parent, width=SIDEBAR_WIDTH, highlightthickness=0,
                            background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
         scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
@@ -275,31 +327,8 @@ class MesaApp(tk.Tk):
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
         self.sidebar_canvas = canvas
 
-        # Шаг 1. Режим
-        step = self._step(body, "1. Режим модели")
-        for mode in presets.MODES:
-            button = ttk.Radiobutton(step, text=presets.MODE_LABELS[mode], value=mode,
-                                     variable=self.mode, command=self._on_mode_change)
-            button.pack(anchor="w")
-            Tooltip(button, hints.plain(hints.with_reference(hints.MODE_HINTS[mode], "modes")))
-        self.mode_lbl = ttk.Label(step, text="", foreground="#555555", font=FONT,
-                                  wraplength=SIDEBAR_WIDTH - 40, justify="left")
-        self.mode_lbl.pack(anchor="w", fill=tk.X, pady=(2, 0))
-        # Модель тока базового режима — из реестра models (basic=True).
-        self.model_row = ttk.Frame(step)
-        label = ttk.Label(self.model_row, text="Модель тока:", font=FONT)
-        label.pack(side=tk.LEFT)
-        self._model_by_label = {m.label: m.key for m in models.basic_models()}
-        self.model_box = ttk.Combobox(self.model_row, state="readonly", width=24,
-                                      values=list(self._model_by_label))
-        self.model_box.pack(side=tk.LEFT, padx=(4, 0))
-        self.model_box.bind("<<ComboboxSelected>>", self._on_current_model)
-        tip = hints.plain(hints.with_reference(hints.CURRENT_MODEL_HINT, "current_model"))
-        for widget in (label, self.model_box):
-            Tooltip(widget, tip)
-
-        # Шаг 2. Образец
-        step = self._step(body, "2. Образец")
+        # Образец
+        step = self._step(body, "Образец")
         row = ttk.Frame(step)
         row.pack(anchor="w", fill=tk.X)
         ttk.Label(row, text="Подложка:", font=FONT).pack(side=tk.LEFT)
@@ -312,34 +341,36 @@ class MesaApp(tk.Tk):
         label = ttk.Label(row, text="Тип i-слоя:", font=FONT)
         label.pack(side=tk.LEFT)
         Tooltip(label, "Знак эффекта Холла i-слоя. n — переход i/подложка (сценарий B), p — переход n⁺/i "
-                       "(сценарий A), «оба» — сравнение сценариев (п. 10.4 методички).")
+                       "(сценарий A), «оба» — сравнение сценариев. От него зависит, какие слои стоят по "
+                       "сторонам перехода: V_bi, ёмкость и ток. " + hints.reference("current_model"))
         for value, text in ((presets.I_TYPE_N, "n"), (presets.I_TYPE_P, "p"), (presets.I_TYPE_BOTH, "оба")):
             ttk.Radiobutton(row, text=text, value=value, variable=self.i_type,
                             command=self._on_scenario_change).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Шаг 3. Параметры
-        step = self._step(body, "3. Параметры")
-        show_all = ttk.Checkbutton(step, text="показать все поля", variable=self.show_all,
-                                   command=self._refresh_fields)
-        show_all.pack(anchor="w")
-        Tooltip(show_all, "Показать и поля, не используемые в текущем режиме (они серые). "
-                          "Их значения сохраняются в наборе.")
-        lock_note = ttk.Label(step, text="☑ справа от поля — зафиксировать при подгонке",
-                              foreground="#555555", font=FONT)
-        lock_note.pack(anchor="w")
-        Tooltip(lock_note, hints.plain(hints.with_reference(hints.LOCK_HINT, "lock")))
+        # Параметры
+        step = self._step(body, "Параметры")
+        self.fields_info = ttk.Label(step, text="", foreground="#333333", font=FONT,
+                                     wraplength=SIDEBAR_WIDTH - 40, justify="left")
+        self.fields_info.pack(anchor="w", fill=tk.X)
+        Tooltip(self.fields_info, hints.plain(hints.with_reference(hints.FIELDS_HINT, "modes")), wraplength=520)
+        show_all = ttk.Checkbutton(step, text="показать скрытые поля (серые)",
+                                   variable=self.show_all, command=self._refresh_fields)
+        show_all.pack(anchor="w", pady=(2, 0))
+        Tooltip(show_all, hints.plain(hints.SHOW_ALL_HINT))
+        self.lock_note = ttk.Label(step, text="", foreground="#555555", font=FONT,
+                                   wraplength=SIDEBAR_WIDTH - 40, justify="left")
+        self.lock_note.pack(anchor="w", fill=tk.X, pady=(2, 0))
+        Tooltip(self.lock_note, hints.plain(hints.with_reference(hints.LOCK_HINT, "lock")), wraplength=520)
+        self.tutorial_targets["params"] = step
         self.entries, self.field_rows, self.sections, self.lock_buttons = {}, {}, {}, {}
         for title, keys in SIDEBAR_GROUPS:
             section = self._section(step, title)
-            for row_index, key in enumerate(keys):
+            section.note = ttk.Label(section.body, text="", foreground="#555555", font=FONT,
+                                     wraplength=SIDEBAR_WIDTH - 50, justify="left")
+            section.note.grid(row=0, column=0, columnspan=4, sticky="w")
+            for row_index, key in enumerate(keys, 1):
                 self._param_row(section.body, row_index, key)
-            extra = len(keys)
-            if "N_i" in keys:
-                self.doping_note = ttk.Label(section.body, text=hints.plain(hints.BASIC_DOPING_NOTE),
-                                             foreground="#555555", font=FONT,
-                                             wraplength=SIDEBAR_WIDTH - 50, justify="left")
-                self.doping_note.grid(row=extra, column=0, columnspan=4, sticky="w", pady=(2, 0))
-                Tooltip(self.doping_note, hints.plain(hints.with_reference(hints.BASIC_DOPING_NOTE, "sensitivity")))
+            extra = len(keys) + 1
             if "d_sub_um" in keys:
                 self.d_i_label = ttk.Label(section.body, text="", foreground="#555555", font=FONT)
                 self.d_i_label.grid(row=extra, column=0, columnspan=3, sticky="w")
@@ -355,21 +386,25 @@ class MesaApp(tk.Tk):
         section = self._section(step, BOUNDARY_TITLE)
         self._build_boundary_box(section.body)
         self.sections[BOUNDARY_TITLE] = (section, [])
+        for key in ("D_um", "N_i", "n_emp", "J0_emp", "Rs", "Rsh"):
+            self.tutorial_targets[key] = self.field_rows[key][1]
+        self._bind_sidebar_scroll(body)
 
-        # Шаг 4. Действия
-        step = self._step(body, "4. Расчёт и подгонка")
-        row = ttk.Frame(step)
+    def _build_actions(self, box):
+        """Кнопки расчёта — всегда видны внизу левой панели."""
+        row = ttk.Frame(box)
         row.pack(anchor="w", fill=tk.X)
-        ttk.Button(row, text="Рассчитать", command=self.recompute).pack(side=tk.LEFT, padx=(0, 4))
+        calc = ttk.Button(row, text="Рассчитать", command=self.recompute)
+        calc.pack(side=tk.LEFT, padx=(0, 4))
+        Tooltip(calc, "Пересчитать графики по полям слева (то же — Enter в поле или колесо мыши).")
         self.fit_button = ttk.Button(row, text="Подогнать к ВАХ", command=self.start_fit)
         self.fit_button.pack(side=tk.LEFT, padx=(0, 4))
-        Tooltip(self.fit_button, hints.plain(hints.with_reference(hints.FIT_HINT, "fit")))
-        row = ttk.Frame(step)
-        row.pack(anchor="w", fill=tk.X, pady=(3, 0))
-        self.autofit_button = ttk.Button(row, text="Заполнить пустые поля", command=self.autofit)
+        Tooltip(self.fit_button, lambda: hints.plain(hints.with_reference(hints.fit_hint(self.mode.get()), "fit")),
+                wraplength=520)
+        self.autofit_button = ttk.Button(row, text="Заполнить пустые", command=self.autofit)
         self.autofit_button.pack(side=tk.LEFT)
         Tooltip(self.autofit_button, hints.plain(hints.with_reference(hints.AUTOFIT_HINT, "autofit")))
-        self._bind_sidebar_scroll(body)
+        self.tutorial_targets.update(fit=self.fit_button, calc=calc)
 
     def _step(self, parent, title):
         frame = ttk.LabelFrame(parent, text=title, padding=(6, 2, 6, 4))
@@ -425,8 +460,10 @@ class MesaApp(tk.Tk):
         Tooltip(lock, lambda key=key: self._lock_tip(key))
 
         def tooltip_text(key=key, head=f"{spec.label}.\n{hint}"):
+            reason = self._field_reason(key)
             source = self.autofilled.get(key)
-            return f"{head}\nПодставлено: {source}." if source else head
+            text = f"{head}\nПодставлено: {source}." if source else head
+            return f"⛔ {reason}\n\n{text}" if reason else text
 
         for widget in (label, entry):
             Tooltip(widget, tooltip_text)
@@ -436,12 +473,22 @@ class MesaApp(tk.Tk):
 
     def _fit_model(self):
         """Модель тока текущего режима (ключ реестра models)."""
-        return presets.current_model({"mode": self.mode.get(), "basic_model": self.basic_model.get()})
+        return presets.current_model({"mode": self.mode.get(), "extended_model": self.extended_model.get()})
+
+    def _fit_terms(self):
+        """Механизмы, которые подгонка может подключить в текущем режиме (None — все)."""
+        return presets.MODE_TERMS[self.mode.get()]
 
     def _on_current_model(self, _event=None):
-        self.basic_model.set(self._model_by_label[self.model_box.get()])
+        self.extended_model.set(self._model_by_label[self.model_box.get()])
         self._refresh_fields()
         self.recompute()
+
+    def _field_reason(self, key):
+        """Почему поле сейчас закрыто и где оно откроется; пустая строка — открыто."""
+        mode, model = self.mode.get(), self._fit_model()
+        return hints.field_reason(key, mode, model, self._scenarios(),
+                                  unused_by_scenario=UNUSED_BY_SCENARIO)
 
     def _locked_fields(self):
         return {key for key, var in self.lock_vars.items() if var.get()}
@@ -453,11 +500,8 @@ class MesaApp(tk.Tk):
             self.lock_vars[other].set(self.lock_vars[key].get())
 
     def _lock_tip(self, key):
-        if key not in fitting.fittable_fields(self._fit_model()):
-            return hints.plain("Этот параметр подгонка не меняет никогда: он измеряется или задаётся "
-                               "таблицей. " + hints.reference("lock"))
         state = ("Зафиксирован: подгонка оставит введённое значение." if self.lock_vars[key].get()
-                 else "Не зафиксирован: подгонка может изменить значение.")
+                 else "Не зафиксирован: «Подогнать к ВАХ» может изменить значение.")
         return hints.plain(f"{state}\n{hints.LOCK_HINT}\n{hints.reference('lock')}")
 
     def _clear_autofilled(self, key):
@@ -518,47 +562,60 @@ class MesaApp(tk.Tk):
             row += 1
 
     # ------------------------------------------------------------ графики
-    def _build_figure_area(self, parent):
-        bar = ttk.Frame(parent)
+    def _build_graph_tabs(self, parent):
+        """Один большой график: вкладки ВАХ, ВФХ и 1/C², плотность тока. Под
+        графиком — галочки кривых этой модели и строка, почему нет остальных."""
+        self.graph_tabs = ttk.Notebook(parent)
+        self.graph_tabs.pack(fill=tk.BOTH, expand=True)
+        self.figures, self.canvases, self.curve_buttons, self.curve_captions = {}, {}, {}, {}
+        for plot, title in GRAPH_TABS:
+            tab = ttk.Frame(self.graph_tabs, padding=(2, 2, 2, 0))
+            self.graph_tabs.add(tab, text=f"  {title}  ")
+            if plot == "cv":
+                self._build_cv_bar(tab)
+            figure = Figure(figsize=(8, 4.2), dpi=100)
+            figure.subplots_adjust(left=0.09, right=0.92 if plot == "jv" else 0.97, bottom=0.12, top=0.93)
+            self.figures[plot] = figure
+            self._build_curve_bar(tab, plot)
+            canvas = FigureCanvasTkAgg(figure, master=tab)
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.canvases[plot] = canvas
+        self.ax_iv = self.figures["iv"].add_subplot(111)
+        self.ax_cv = self.figures["cv"].add_subplot(111)
+        self.ax_jv = self.figures["jv"].add_subplot(111)
+        self.ax_jv_n = self.ax_jv.twinx()
+
+    def _build_cv_bar(self, tab):
+        bar = ttk.Frame(tab)
         bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
-        ttk.Label(bar, text="График 2:", font=FONT).pack(side=tk.LEFT)
-        for value, text in (("C", "ВФХ"), ("invC2", "1/C²")):
+        for value, text in (("C", "ВФХ C(V)"), ("invC2", "1/C²")):
             ttk.Radiobutton(bar, text=text, value=value, variable=self.cv_view,
                             command=self.recompute).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(bar, text="   участок прямой 1/C²: от", font=FONT).pack(side=tk.LEFT)
+        label = ttk.Label(bar, text="   участок прямой 1/C²: от", font=FONT)
+        label.pack(side=tk.LEFT)
+        Tooltip(label, hints.plain(hints.CURVE_HINTS["fit_C"]))
         for var in (self.c2_from_var, self.c2_to_var):
             e = ttk.Entry(bar, textvariable=var, width=6, justify="center")
             e.pack(side=tk.LEFT, padx=2)
             e.bind("<Return>", lambda _e: self.recompute())
         ttk.Label(bar, text="В", font=FONT).pack(side=tk.LEFT)
 
-        self.fig = Figure(figsize=(12, 3.6), dpi=100)
-        gs = self.fig.add_gridspec(1, 3, wspace=0.40)
-        self.fig.subplots_adjust(left=0.06, right=0.95, bottom=0.15, top=0.90)
-        self.ax_iv = self.fig.add_subplot(gs[0, 0])
-        self.ax_cv = self.fig.add_subplot(gs[0, 1])
-        self.ax_jv = self.fig.add_subplot(gs[0, 2])
-        self.ax_jv_n = self.ax_jv.twinx()
-        self._build_curve_bar(parent)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-    def _build_curve_bar(self, parent):
-        """Галочки кривых под каждым графиком; подсказка — что это за кривая."""
-        bar = ttk.Frame(parent)
-        bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
-        self.curve_buttons = {}
-        per_row = 4
-        for column, plot in enumerate(("iv", "cv", "jv")):
-            bar.columnconfigure(column, weight=1, uniform="curves")
-            frame = ttk.Frame(bar)
-            frame.grid(row=0, column=column, sticky="nw", padx=(30, 0))
-            for index, (key, label) in enumerate(CURVES[plot]):
-                button = ttk.Checkbutton(frame, text=label, variable=self.curve_vars[(plot, key)],
-                                         command=self._redraw)
-                button.grid(row=index // per_row, column=index % per_row, sticky="w", padx=(0, 6))
-                Tooltip(button, hints.plain(hints.with_reference(hints.CURVE_HINTS[key], "curves")))
-                self.curve_buttons[(plot, key)] = button
+    def _build_curve_bar(self, tab, plot):
+        """Галочки кривых графика plot; подсказка — что это за кривая."""
+        bar = ttk.Frame(tab)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 2))
+        caption = ttk.Label(bar, text="", foreground="#555555", font=FONT, wraplength=900, justify="left")
+        caption.pack(side=tk.BOTTOM, anchor="w", fill=tk.X)
+        Tooltip(caption, hints.plain(hints.with_reference(hints.CURVES_BY_MODEL_HINT, "curves")), wraplength=520)
+        self.curve_captions[plot] = caption
+        frame = ttk.Frame(bar)
+        frame.pack(side=tk.TOP, anchor="w")
+        for index, (key, label) in enumerate(CURVES[plot]):
+            button = ttk.Checkbutton(frame, text=label, variable=self.curve_vars[(plot, key)],
+                                     command=self._redraw)
+            button.grid(row=0, column=index, sticky="w", padx=(0, 8))
+            Tooltip(button, hints.plain(hints.with_reference(hints.CURVE_HINTS[key], "curves")))
+            self.curve_buttons[(plot, key)] = button
 
     def _shown(self, plot, key):
         return self.curve_vars[(plot, key)].get()
@@ -673,7 +730,7 @@ class MesaApp(tk.Tk):
         for key, var in self.flag_vars.items():
             var.set(bool(params[key]))
         self.i_type.set(params["i_type"])
-        self.basic_model.set(params.get("basic_model") or ph.MODEL_EMPIRICAL)
+        self.extended_model.set(params.get("extended_model") or presets.DEFAULT_EXTENDED_MODEL)
         locked = set(params.get("locked") or ())
         for key, var in self.lock_vars.items():
             var.set(key in locked)
@@ -713,8 +770,8 @@ class MesaApp(tk.Tk):
         if not path:
             return
         preset = presets.Preset(name=Path(path).stem, params=params, metadata=self.preset.metadata,
-                                files={"iv": [d["path"] for d in self.exp_iv],
-                                       "cv": [d["path"] for d in self.exp_cv]},
+                                files={"iv": [d["path"] for d in self.exp_iv if d["path"]],
+                                       "cv": [d["path"] for d in self.exp_cv if d["path"]]},
                                 notes=self.preset.notes)
         self.preset = presets.save_preset(preset, path)
         self.preset_label.config(text=f"Набор: {self.preset.name}")
@@ -786,40 +843,54 @@ class MesaApp(tk.Tk):
         self._on_scenario_change()
 
     def _refresh_fields(self):
-        """Поля боковой панели: видны только используемые в режиме (или все,
-        если включено «показать все поля» — тогда лишние серые). Значения не
-        меняются. Подвижности, не входящие в сценарий, — серые."""
+        """Поля левой панели по режиму и модели тока: открытые — нужны модели;
+        остальные скрыты (или серые при «показать и скрытые поля») с подсказкой,
+        почему закрыты и где откроются. Галочка фиксации — только у полей,
+        которые подбирает подгонка в этом режиме. Значения не меняются."""
         scenarios = self._scenarios()
-        mode = self.mode.get()
-        self.mode_lbl.config(text=hints.plain(hints.MODE_HINTS[mode]))
-        self.model_box.set(models.get(self.basic_model.get()).label)
-        if mode == presets.MODE_BASIC:
-            self.model_row.pack(anchor="w", fill=tk.X, pady=(3, 0))
+        mode, model = self.mode.get(), self._fit_model()
+        self.mode_lbl.config(text=hints.plain(hints.MODE_SHORT[mode]))
+        self.model_box.set(models.get(self.extended_model.get()).label)
+        if mode == presets.MODE_EXTENDED:
+            self.model_row.pack(side=tk.LEFT, before=self.mode_lbl)
         else:
             self.model_row.pack_forget()
-        editable = presets.editable_keys(mode, self.basic_model.get())
-        fittable = fitting.fittable_fields(self._fit_model())
+        editable = presets.editable_keys(mode, model)
+        fittable = fitting.fittable_fields(model, self._fit_terms())
         unused = set.intersection(*(UNUSED_BY_SCENARIO[sc] for sc in scenarios))
         show_all = self.show_all.get()
+        physical = model == ph.MODEL_PHYSICAL
+        shown_count = locks = 0
         for title, (section, keys) in self.sections.items():
             visible = 0
             for key in keys:
                 active = key in editable and key not in unused
                 self.entries[key].state(["!disabled"] if active else ["disabled"])
-                can_lock = active and key in fittable
-                self.lock_buttons[key].state(["!disabled"] if can_lock else ["disabled"])
                 shown = show_all or key in editable
-                for widget in self.field_rows[key]:
+                label, entry, unit, lock = self.field_rows[key]
+                for widget in (label, entry, unit):
                     widget.grid() if shown else widget.grid_remove()
+                can_lock = shown and active and key in fittable
+                lock.grid() if can_lock else lock.grid_remove()
                 visible += shown
+                shown_count += active
+                locks += can_lock
+            note = hints.section_note(title, mode, model)
+            if keys:
+                section.note.config(text=hints.plain(note))
+                section.note.grid() if note and visible else section.note.grid_remove()
             if title == BOUNDARY_TITLE:
-                visible = show_all or mode != presets.MODE_BASIC
+                visible = physical and (show_all or mode != presets.MODE_BASIC)
             if visible:
                 section.pack(fill=tk.X, pady=(3, 0))
             else:
                 section.pack_forget()
-        physical = mode != presets.MODE_BASIC
-        self.doping_note.grid() if not physical else self.doping_note.grid_remove()
+        hidden = len(SPECS) - shown_count
+        self.fields_info.config(text=hints.plain(hints.fields_info(mode, model, shown_count, hidden)))
+        names = ", ".join(hints.plain(SHORT_LABELS[k]) for k in SPECS if k in fittable and k in editable)
+        self.lock_note.config(text=hints.plain(
+            f"☑ справа от поля — «не менять при подгонке». Галочки есть только у параметров, которые "
+            f"подбирает «Подогнать к ВАХ» в этом режиме: {names}." if locks else ""))
         for scenario, fields in BOUNDARY_FIELDS.items():
             for key, _label in fields:
                 state = ["!disabled"] if physical and scenario in scenarios else ["disabled"]
@@ -829,15 +900,14 @@ class MesaApp(tk.Tk):
         for button in self.flag_buttons.values():
             button.state(["!disabled"] if fit else ["disabled"])
         self.n2_button.state(["!disabled"] if fit else ["disabled"])
-        empirical = self._fit_model() == ph.MODEL_EMPIRICAL
-        self.n_emp_button.state(["!disabled"] if empirical else ["disabled"])
-        self.autofit_button.state(["!disabled"] if physical else ["disabled"])
+        self.n_emp_button.state(["!disabled"] if model == ph.MODEL_EMPIRICAL else ["disabled"])
+        self.autofit_button.state(["!disabled"] if mode != presets.MODE_BASIC else ["disabled"])
 
     def _read_params(self):
         params = {"substrate": self.substrate.get(), "i_type": self.i_type.get(),
-                  "mode": self.mode.get(), "basic_model": self.basic_model.get(),
+                  "mode": self.mode.get(), "extended_model": self.extended_model.get(),
                   "locked": sorted(self._locked_fields())}
-        editable = presets.editable_keys(self.mode.get(), self.basic_model.get())
+        editable = presets.editable_keys(self.mode.get(), self._fit_model())
         missing = []
         for key, var in self.vars.items():
             raw = var.get().strip().replace(",", ".")
@@ -935,8 +1005,8 @@ class MesaApp(tk.Tk):
 
     # ------------------------------------------------------ автоподгонка
     def start_fit(self):
-        """«Подогнать к ВАХ»: в базовом режиме — эмпирическая модель (J₀, n),
-        иначе — физическая (τ₀^bg, τ^bg); вместе с эквивалентной схемой.
+        """«Подогнать к ВАХ»: модель тока режима и её параметры вместе с
+        эквивалентной схемой; в базовом режиме — только n, J₀, R_s, R_sh.
         Считается в фоне, окно не замирает."""
         if self._fit_thread is not None:
             return
@@ -951,8 +1021,9 @@ class MesaApp(tk.Tk):
             return
         s = presets.to_structure(params, self._scenarios()[-1])
         model = self._fit_model()
+        terms = self._fit_terms()
         locked = self._locked_fields()
-        if fitting.fittable_fields(model) <= locked:
+        if fitting.fittable_fields(model, terms) <= locked:
             messagebox.showinfo("Подгонка", "Все подбираемые параметры зафиксированы — подбирать нечего. "
                                             "Снимите галочку хотя бы у одного параметра.\n"
                                             + hints.reference("lock"))
@@ -966,7 +1037,8 @@ class MesaApp(tk.Tk):
             try:
                 self._fit_box["result"] = fitting.fit_iv(
                     s, data["voltage"], data["value"], model,
-                    progress=lambda text: self._fit_box.__setitem__("progress", text), locked=locked)
+                    progress=lambda text: self._fit_box.__setitem__("progress", text), locked=locked,
+                    terms=terms)
             except Exception as error:     # сообщение показывается в главном потоке
                 self._fit_box["error"] = str(error)
 
@@ -1016,7 +1088,12 @@ class MesaApp(tk.Tk):
 
     def _show_fit_result(self, result):
         self.fit_table.delete(*self.fit_table.get_children())
+        # механизмы, которых в режиме нет (базовый: утечка, модуляция), в таблицу не выводятся
+        hidden = {p for term, (_name, keys) in fitting.TERMS.items() if term not in result.allowed_terms
+                  for p in keys}
         for key, raw in result.params.items():
+            if key in hidden:
+                continue
             value = fitting.display_value(key, raw)
             log_scale = fitting.PARAMS[key][1]
             sigma = result.stderr.get(key, float("nan"))
@@ -1163,6 +1240,7 @@ class MesaApp(tk.Tk):
         self._update_deviation(main)
         self._redraw()
         self._plot_mesa(params, main)
+        self.scheme.show(main, self.mode.get())
         self._update_status(n_exp, n_mod)
         if self.formulas_window is not None:
             self.formulas_window.refresh()
@@ -1207,7 +1285,8 @@ class MesaApp(tk.Tk):
         self._plot_iv(self._V, self._n_exp)
         self._plot_cv()
         self._plot_jv(self._V, self._n_exp)
-        self.canvas.draw_idle()
+        for canvas in self.canvases.values():
+            canvas.draw_idle()
 
     @staticmethod
     def _ideality_window(params):
@@ -1310,14 +1389,25 @@ class MesaApp(tk.Tk):
     def _model(self):
         return next(iter(self.structures.values())).model
 
+    def _absent_curves(self):
+        """Кривые, которых нет в текущей модели и режиме (галочки скрыты)."""
+        absent = set(CURVES_BY_MODEL.get(self._model(), set(models.COMPONENTS)))
+        if self.mode.get() == presets.MODE_BASIC:
+            absent.add("L")                     # простой диод — без нелинейной утечки
+        return absent
+
     def _visible(self, plot, key):
         """Кривая показывается: галочка стоит и кривая есть в текущей модели."""
-        return self._shown(plot, key) and key not in CURVES_BY_MODEL[self._model()]
+        return self._shown(plot, key) and key not in self._absent_curves()
 
     def _update_curve_buttons(self):
-        absent = CURVES_BY_MODEL[self._model()]
+        """Галочки только кривых этой модели; подпись — чего нет и почему."""
+        absent = self._absent_curves()
         for (_plot, key), button in self.curve_buttons.items():
-            button.state(["disabled"] if key in absent else ["!disabled"])
+            button.grid() if key not in absent else button.grid_remove()
+        text = hints.plain(hints.curves_caption(self._model(), self.mode.get(), absent))
+        for caption in self.curve_captions.values():
+            caption.config(text=text)
 
     @staticmethod
     def _legend(ax, handles=None, labels=None, **kwargs):
@@ -1359,7 +1449,7 @@ class MesaApp(tk.Tk):
         ax.set_ylim(y_lo * factor, y_hi * factor)
         ax.axhline(0, color="#999999", linewidth=0.7)
         ax.axvline(0, color="#999999", linewidth=0.7)
-        ax.set_title("График 1. ВАХ", fontsize=10)
+        ax.set_title("ВАХ: модель и эксперимент", fontsize=10)
         ax.set_xlabel("V, В")
         ax.set_ylabel(f"I, {unit}")
         ax.grid(True, linewidth=0.4, alpha=0.6)
@@ -1392,7 +1482,7 @@ class MesaApp(tk.Tk):
                             markerfacecolor="none", label=dataset["label"])
             ax.set_yscale("log")
             ax.set_ylabel(f"C, {unit} (лог.)")
-            ax.set_title("График 2. ВФХ", fontsize=10)
+            ax.set_title("ВФХ C(V)", fontsize=10)
         else:
             window = self._c2_window()
             if show_model:
@@ -1423,7 +1513,7 @@ class MesaApp(tk.Tk):
                 for x in window:
                     ax.axvline(x, color="#bbbbbb", linewidth=0.7, linestyle=":")
             ax.set_ylabel("1/C², пФ⁻²")
-            ax.set_title("График 2. 1/C² (прямые — на выбранном участке)", fontsize=10)
+            ax.set_title("1/C² (прямые — на выбранном участке)", fontsize=10)
         ax.set_xlabel("V, В")
         ax.grid(True, which="both", linewidth=0.4, alpha=0.6)
         self._legend(ax, fontsize=7, loc="best")
@@ -1481,7 +1571,7 @@ class MesaApp(tk.Tk):
         finite = np.concatenate([v[np.isfinite(v) & (v > 0)] for v in values]) if values else np.array([])
         if finite.size:
             ax.set_ylim(max(finite.min() * 0.5, finite.max() * 1e-12), finite.max() * 2)
-        ax.set_title("График 3. Плотность тока |J|–V", fontsize=10)
+        ax.set_title("Плотность тока |J|–V и локальный n(V)", fontsize=10)
         ax.set_xlabel("V, В")
         ax.set_ylabel("|J|, А/см²")
         ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
@@ -1506,6 +1596,30 @@ class MesaApp(tk.Tk):
     # ------------------------------------------- окно формул
     def open_formulas_window(self):
         formulas_module.open_formulas_window(self)
+
+    # ------------------------------------------------ обучение
+    def start_tutorial(self):
+        """Обучение: первое моделирование в базовом режиме (tutorial.STEPS)."""
+        if self.tutorial_window is not None:
+            self.tutorial_window.window.lift()
+            return
+        self.tutorial_window = tutorial.TutorialWindow(self)
+
+    def tutorial_prepare(self):
+        """Модельный образец, базовый режим, без загруженных данных."""
+        self._apply_preset(presets.default_preset())
+        self.mode.set(presets.MODE_BASIC)
+        self.exp_iv, self.exp_cv = [], []
+        self._on_mode_change()
+        self.graph_tabs.select(0)
+
+    def tutorial_load_example(self):
+        """Пример ВАХ модельного образца (синтетика) как загруженная ВАХ."""
+        V, I = tutorial.example_iv()
+        self.exp_iv = [{"label": tutorial.EXAMPLE_LABEL, "path": "", "voltage": V, "value": I}]
+        self._take_from_iv = True
+        self.graph_tabs.select(0)
+        self.recompute()
 
 
 def main():

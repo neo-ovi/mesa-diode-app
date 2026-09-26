@@ -93,56 +93,79 @@ STORED_KEYS = frozenset(spec.key for spec in NUMERIC_PARAMS
 CHOICE_FIELDS = ("bc_A_n", "bc_A_p", "bc_B_n", "bc_B_p")
 FLAG_FIELDS = ("sns_refinement", "edge_area")
 
-# Режимы окна. Значения при переключении сохраняются, меняется только то,
-# какие поля доступны для правки:
-#   базовый — эмпирическая модель (6.3): минимум параметров, строится сразу;
-#   расширенный — физическая модель по всему, что экспериментатор измеряет
-#     (ВАХ, ВФХ, Холл, ρ, геометрия, технология, EPD, АСМ, XRD);
-#   «Подгонка» — плюс параметры формул, которые не измеряются (подвижности
-#     неосновных носителей, σ_R, времена жизни, n₂, нелинейная утечка).
-# n и J₀ формулы (6.3) есть только в базовом режиме: физическая модель их
-# не использует.
+# Режимы окна (методичка, п. 1А.1). Значения при переключении сохраняются,
+# меняется модель тока и то, какие поля доступны для правки:
+#   «Базовая» — простой диод: I = A·J₀·(e^{V_д/nV_t} − 1) + V_д/R_sh,
+#     V = V_д + I·R_s; каждую точку можно посчитать вручную. Концентрации —
+#     только для ВФХ и V_bi (по Больцману, (3.1));
+#   «Расширенная» — модель тока на выбор (однодиодная (6.3) со всей
+#     эквивалентной схемой, двухдиодная (6.3а), физическая) и всё, что
+#     экспериментатор измеряет (ВАХ, ВФХ, Холл, ρ, геометрия, технология);
+#   «Подгонка» — физическая модель плюс параметры формул, которые не
+#     измеряются (подвижности неосновных носителей, σ_R, времена жизни, n₂).
 MODE_BASIC, MODE_EXTENDED, MODE_FIT = "basic", "extended", "fit"
 MODES = (MODE_BASIC, MODE_EXTENDED, MODE_FIT)
 MODE_LABELS = {MODE_BASIC: "Базовая модель", MODE_EXTENDED: "Расширенная модель",
                MODE_FIT: "Подгонка"}
-# Модель тока в режиме: базовый — выбранная из models.basic_models()
-# (поле basic_model), расширенный и «Подгонка» — физическая.
-MODE_MODEL = {MODE_BASIC: ph.MODEL_EMPIRICAL, MODE_EXTENDED: ph.MODEL_PHYSICAL,
-              MODE_FIT: ph.MODEL_PHYSICAL}
-BASIC_MODELS = tuple(m.key for m in models.basic_models())
+DEFAULT_EXTENDED_MODEL = ph.MODEL_PHYSICAL
+EXTENDED_MODELS = tuple(m.key for m in models.selectable_models())
 EMPIRICAL_KEYS = models.get(ph.MODEL_EMPIRICAL).fields
 MODEL_KEYS = models.model_fields()           # поля, нужные только своей модели тока
-# Эквивалентная схема (R_s, его модуляция, шунт, нелинейная утечка) нужна
-# и эмпирической, и физической модели: без неё не описать изгиб ветвей ВАХ.
+# Эквивалентная схема (R_s, его модуляция, шунт, нелинейная утечка).
 CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
-# ρ подложки — в базовом режиме: в сценарии B подложка — p-сторона перехода,
-# и по ρ_sub (2.8) считаются V_bi, ширина ОПЗ и ВФХ.
-BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "N_As", "T_rho", "T"})
-              | CIRCUIT_KEYS | MODEL_KEYS)
-MEASURED_KEYS = (BASIC_KEYS - MODEL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um", "d_s_um",
-                                                 "N_dis"} | STORED_KEYS
+# Базовый режим — только диод, R_s и R_sh: утечка и модуляция R_s выключены
+# (в расчёте — эти значения, поля скрыты), подгонка их не подключает.
+BASIC_CIRCUIT_KEYS = frozenset({"Rs", "Rsh"})
+BASIC_OFF = {"I_L": 0.0, "I_mod": float("inf")}
+MODE_TERMS = {MODE_BASIC: (), MODE_EXTENDED: None, MODE_FIT: None}   # None — все механизмы
+# Поля базового режима по назначению: для ВАХ — диод и схема; для ВФХ и V_bi —
+# концентрации обеих сторон перехода (N_A подложки — по ρ_sub или N_As).
+BASIC_IV_KEYS = EMPIRICAL_KEYS | BASIC_CIRCUIT_KEYS | {"D_um", "T"}
+BASIC_CV_KEYS = frozenset({"ND_plus", "N_i", "rho_sub", "N_As"})
+BASIC_KEYS = BASIC_IV_KEYS | BASIC_CV_KEYS
+MEASURED_KEYS = ((BASIC_KEYS - EMPIRICAL_KEYS) | CIRCUIT_KEYS
+                 | {"D_inner_um", "h_um", "T_rho", "d_epi_um", "d_n_um", "d_sub_um", "d_s_um", "N_dis"}
+                 | STORED_KEYS)
 FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
                            "tau_n_bg", "tau_p_bg", "tau0_bg", "n2"})
-MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: MEASURED_KEYS,
+MODE_KEYS = {MODE_BASIC: BASIC_KEYS, MODE_EXTENDED: MEASURED_KEYS | MODEL_KEYS,
              MODE_FIT: MEASURED_KEYS | FIT_ONLY_KEYS}
 
 
-def editable_keys(mode, basic_model=None):
-    """Числовые параметры, доступные для правки в режиме mode. basic_model —
-    модель тока базового режима: поля других моделей тогда не нужны."""
-    keys = MODE_KEYS.get(mode, MODE_KEYS[MODE_FIT])
-    if mode == MODE_BASIC and basic_model is not None:
-        keys = keys - (MODEL_KEYS - models.get(basic_model).fields)
-    return keys
-
-
 def current_model(params):
-    """Ключ модели тока по параметрам набора (режим и basic_model)."""
+    """Ключ модели тока: базовый режим — однодиодная (простой диод), «Подгонка» —
+    физическая, расширенный — выбранная в списке «Модель тока» (extended_model)."""
     mode = params.get("mode")
     if mode == MODE_BASIC:
-        return params.get("basic_model") or ph.MODEL_EMPIRICAL
-    return MODE_MODEL.get(mode, ph.MODEL_PHYSICAL)
+        return ph.MODEL_EMPIRICAL
+    if mode == MODE_EXTENDED:
+        return params.get("extended_model") or DEFAULT_EXTENDED_MODEL
+    return ph.MODEL_PHYSICAL
+
+
+def editable_keys(mode, model=None):
+    """Числовые параметры, доступные для правки в режиме mode при модели тока
+    model (по умолчанию — модель режима): поля других моделей не нужны."""
+    keys = MODE_KEYS.get(mode, MODE_KEYS[MODE_FIT])
+    model = model or current_model({"mode": mode})
+    return keys - (MODEL_KEYS - models.get(model).fields)
+
+
+def mode_where_editable(key):
+    """Первый режим, где поле можно менять (при подходящей модели тока), или None."""
+    for mode in MODES:
+        if key in MODE_KEYS[mode]:
+            return mode
+    return None
+
+
+def model_for_field(key):
+    """Модель тока, которой нужно поле (только для полей моделей), или None."""
+    for m in models.selectable_models():
+        if key in m.fields:
+            return m.key
+    return None
+
 
 # Опорный образец — модельная структура (не параметры какого-либо образца): методичка, п. 2.7.
 DEFAULT_PARAMS = {
@@ -180,7 +203,7 @@ DEFAULT_PARAMS = {
     "J0_emp": 1e-6,
     "J01_2d": 1e-7,
     "J02_2d": 1e-5,
-    "basic_model": ph.MODEL_EMPIRICAL,
+    "extended_model": DEFAULT_EXTENDED_MODEL,
     "afm_rms_nm": None,
     "afm_defects": None,
     "xrd_fwhm": None,
@@ -282,6 +305,9 @@ def to_structure(params, scenario=None):
     if scenario is None:
         scenario = I_TYPE_TO_SCENARIO.get(merged["i_type"], ph.SCENARIO_B)
     model = current_model(merged)
+    if merged.get("mode") == MODE_BASIC:
+        # простой диод: без утечки и модуляции, V_bi по Больцману (3.1) — всё считается вручную
+        kwargs.update(BASIC_OFF, vbi_method=ph.VBI_BOLTZMANN)
     return ph.Structure(scenario=scenario, model=model, **kwargs)
 
 
@@ -300,6 +326,9 @@ def load_preset(path):
     # Наборы, сохранённые до появления режимов, заданы для физической модели
     # целиком — открываются в «Подгонке».
     params.setdefault("mode", MODE_FIT)
+    # До 3.6 двухдиодная модель была в базовом режиме — теперь она в расширенном.
+    if params.pop("basic_model", None) == ph.MODEL_TWO_DIODE and params["mode"] == MODE_BASIC:
+        params.update(mode=MODE_EXTENDED, extended_model=ph.MODEL_TWO_DIODE)
     return Preset(name=data.get("name", path.stem), params=params,
                   metadata=data.get("metadata", {}),
                   files=data.get("files", {"iv": [], "cv": []}),

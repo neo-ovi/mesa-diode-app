@@ -11,7 +11,7 @@ SINK, REFLECT, LONG, LAYER = "sink", "reflect", "long", "layer"
 BOUNDARY_LABELS = {SINK: "сток", REFLECT: "отражение", LONG: "длинная база", LAYER: "соседний слой"}
 
 MODEL_PHYSICAL = "physical"     # физическая модель §2–§6
-MODEL_EMPIRICAL = "empirical"   # эмпирическая модель (6.3): J₀ и n задаются (базовый режим)
+MODEL_EMPIRICAL = "empirical"   # однодиодная (6.3): J₀ и n задаются (простой диод базового режима)
 MODEL_TWO_DIODE = "two_diode"   # двухдиодная модель (6.3а): J₀₁ (n = 1) и J₀₂ (n = 2)
 # Формулы тока перехода каждой модели — в реестре simulator/models.py.
 

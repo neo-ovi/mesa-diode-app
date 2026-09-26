@@ -42,7 +42,7 @@ class CurrentModel:
     parts: object          # parts(s, Vd) → {компонента: ток, А}
     saturation: object     # saturation(s) → (J при V → 0, А/см², подпись)
     start: object          # start(s, V, I) → начальные значения fit_core
-    basic: bool = False    # доступна в базовом режиме
+    choice: bool = True    # в списке «Модель тока» расширенного режима
     ref: str = ""          # пункт методички
 
 
@@ -61,8 +61,9 @@ def get(key):
         raise ValueError(f"неизвестная модель тока: {key!r}; есть: {', '.join(MODELS)}") from None
 
 
-def basic_models():
-    return [m for m in MODELS.values() if m.basic]
+def selectable_models():
+    """Модели списка «Модель тока» расширенного режима (методичка, п. 1А.1)."""
+    return [m for m in MODELS.values() if m.choice]
 
 
 def model_fields():
@@ -97,13 +98,13 @@ def _empirical_parts(s, Vd):
 
 
 register(CurrentModel(
-    key=ph.MODEL_EMPIRICAL, label="эмпирическая (6.3)", formula="(6.3)",
+    key=ph.MODEL_EMPIRICAL, label="однодиодная (6.3)", formula="(6.3)",
     summary="I = A·J₀·(e^{qV/nkT} − 1): два параметра, n и J₀, без связи со структурой.",
     fields=frozenset({"n_emp", "J0_emp"}), fit_core=("J0_emp", "n_emp"),
     components=("emp",), parts=_empirical_parts,
     saturation=lambda s: (s.J0_emp, "J₀"),
     start=lambda s, V, I: {"J0_emp": _reverse_start(V, I, s.area), "n_emp": 1.5},
-    basic=True, ref="п. 1А.7; гл. 8"))
+    ref="п. 1А.7; гл. 8"))
 
 
 # ------------------------------------------------ двухдиодная (6.3а)
@@ -126,7 +127,7 @@ register(CurrentModel(
     components=("d1", "d2"), parts=_two_diode_parts,
     saturation=lambda s: (s.J01_2d + s.J02_2d, "J₀₁ + J₀₂"),
     start=_two_diode_start,
-    basic=True, ref="п. 8.4"))
+    ref="п. 8.4"))
 
 
 # ------------------------------------------------ физическая (§4–§5)

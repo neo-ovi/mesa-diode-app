@@ -66,10 +66,15 @@ class Tooltip:
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self._tip = tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)
-        tip.wm_geometry(f"+{x}+{y}")
         tk.Label(tip, text=text, justify="left", background="#ffffe8", relief="solid",
                  borderwidth=1, wraplength=self.wraplength, font=("Segoe UI", 9),
                  padx=6, pady=4).pack()
+        tip.update_idletasks()
+        # не выходить за край экрана: у правого края — левее, у нижнего — над виджетом
+        x = min(x, max(0, self.widget.winfo_screenwidth() - tip.winfo_reqwidth() - 4))
+        if y + tip.winfo_reqheight() > self.widget.winfo_screenheight():
+            y = max(0, self.widget.winfo_rooty() - tip.winfo_reqheight() - 4)
+        tip.wm_geometry(f"+{x}+{y}")
 
     def _hide(self, _event=None):
         self._cancel()

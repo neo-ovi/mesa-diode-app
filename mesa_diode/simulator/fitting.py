@@ -61,9 +61,11 @@ def display_value(key, value):
     return value / SCALES.get(key, 1.0) if value == value else value
 
 
-def fittable_fields(model):
-    """Поля окна, которые подгонка модели model может изменить."""
-    params = set(core(model)) | {p for _name, keys in TERMS.values() for p in keys}
+def fittable_fields(model, terms=None):
+    """Поля окна, которые подгонка модели model может изменить; terms —
+    доступные механизмы (None — все, () — базовый режим: только диод и схема)."""
+    allowed = TERMS if terms is None else {t: TERMS[t] for t in terms}
+    params = set(core(model)) | {p for _name, keys in allowed.values() for p in keys}
     return {f for f, p in FIELD_TO_PARAM.items() if p in params}
 
 
@@ -103,6 +105,7 @@ class FitResult:
     locked: tuple = ()              # параметры подгонки, зафиксированные пользователем
     target: float = TARGET_ERROR    # достаточная ошибка (6.10) при выборе варианта
     at_bounds: tuple = ()           # параметры, упёршиеся в границу допустимых значений
+    allowed_terms: tuple = tuple(TERMS)   # механизмы, которые можно было подключить (режим)
 
     def structure_values(self):
         """Значения для полей окна (ключи presets): τ_bg → τ_n^bg и τ_p^bg."""
@@ -241,19 +244,22 @@ def _stderr(keys, logs, jac, res):
     return out
 
 
-def _variants(s, lock):
-    """Проверяемые наборы механизмов с учётом фиксированных параметров.
+def _variants(s, lock, terms=None):
+    """Проверяемые наборы механизмов с учётом фиксированных параметров и
+    доступных механизмов terms (None — все).
 
     Зафиксированный I_L = 0 (или I_mod = ∞) выключает механизм, ненулевой
     (конечный) — включает его во всех вариантах."""
     variants = [(), (TERM_LEAK,), (TERM_MOD,), (TERM_LEAK, TERM_MOD)]
+    if terms is not None:
+        variants = [v for v in variants if set(v) <= set(terms)]
     if "I_L" in lock:
         forced = s.I_L > 0
         variants = [v for v in variants if (TERM_LEAK in v) == forced]
     if "I_mod" in lock:
         forced = np.isfinite(s.I_mod)
         variants = [v for v in variants if (TERM_MOD in v) == forced]
-    return variants
+    return variants or [()]
 
 
 def _locked_values(s, lock):
@@ -300,7 +306,7 @@ def _at_bounds(keys, logs, values, rtol=1e-3):
     return tuple(out)
 
 
-def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERROR):
+def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERROR, terms=None):
     """Подгонка ВАХ с выбором механизмов (§6.7).
 
     s — Structure с текущими параметрами (геометрия, легирование и т. д.);
@@ -308,7 +314,8 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     progress(text) — необязательный вызов для строки состояния.
     target — достаточная ошибка (6.10) для выбора варианта (select_variant).
     locked — поля окна (ключи presets), зафиксированные пользователем: их
-    значения берутся из s и не меняются."""
+    значения берутся из s и не меняются. terms — механизмы, которые можно
+    подключать (None — все; () — базовый режим: диод, R_s и R_sh)."""
     base = replace(s, model=models.get(model).key)
     V, I = prepare_data(V, I)
     if V.size < 8:
@@ -323,12 +330,12 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     off = {"I_L": 0.0, "I_mod": float("inf")}
     candidates = []
     best = None                      # лучший по BIC — только для начального приближения
-    for terms in _variants(base, lock):
+    for variant in _variants(base, lock, terms):
         if progress:
-            progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
+            progress("подгонка: " + (", ".join(TERMS[t][0] for t in variant) or "минимальная модель"))
         # d_s подбирается, только если обогащённый слой задан (N_As > 0 и d_s > 0)
         used = [k for k in core(model) if k != "d_s" or base.has_surface_layer]
-        used += [p for t in terms for p in TERMS[t][1]]
+        used += [p for t in variant for p in TERMS[t][1]]
         keys = [k for k in used if k not in lock]
         fixed = {k: v for k, v in off.items() if k not in used}
         s_run = apply(base, fixed)
@@ -339,11 +346,11 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
         values, jac, res, logs = _fit_keys(model, s_run, V, I, keys, seed, I_ref)
         values_all = {**fixed, **{k: v for k, v in held.items() if k in used}, **values}
         Im = model_current(s_run, V, values)
-        cand = Candidate(terms=terms, params=values_all, error=relative_error(Im, I, floor),
+        cand = Candidate(terms=variant, params=values_all, error=relative_error(Im, I, floor),
                          bic=bic(res, len(keys)))
         cand._fit = (keys, logs, jac, res, Im)
         candidates.append(cand)
-        if best is None or cand.bic < best.bic - (BIC_GAIN if len(terms) > len(best.terms) else 0.0):
+        if best is None or cand.bic < best.bic - (BIC_GAIN if len(variant) > len(best.terms) else 0.0):
             best = cand
     best = select_variant(candidates, target)
     best.accepted = True
@@ -357,7 +364,8 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
         error_forward=relative_error(Im[fwd], I[fwd], floor) if fwd.any() else float("nan"),
         error_reverse=relative_error(Im[rev], I[rev], floor) if rev.any() else float("nan"),
         bic=best.bic, V=V, I_exp=I, I_model=Im, candidates=candidates, locked=tuple(sorted(lock)),
-        target=target, at_bounds=_at_bounds(keys, logs, best.params))
+        target=target, at_bounds=_at_bounds(keys, logs, best.params),
+        allowed_terms=tuple(TERMS) if terms is None else tuple(terms))
     result.notes = explain(result, base)
     return result
 
@@ -368,6 +376,12 @@ def _selection_notes(result):
     """Почему выбран этот вариант: достаточная точность или BIC."""
     target = 100 * result.target
     chosen = next(c for c in result.candidates if c.accepted)
+    if not result.allowed_terms:
+        verdict = ("в пределах" if chosen.error <= result.target else "больше")
+        return [f"Базовая модель — простой диод с R_s и R_sh, механизмы не подключаются. Ошибка "
+                f"{100 * chosen.error:.2f} % — {verdict} {target:.0f} %. Базовая модель грубая намеренно; "
+                "точнее описывает режим «Расширенная» (утечка, модуляция R_s, двухдиодная или "
+                "физическая модель)."]
     if result.target and chosen.error <= result.target:
         better = [c for c in result.candidates
                   if c.error < 0.8 * chosen.error and len(c.terms) > len(chosen.terms)]
@@ -512,7 +526,11 @@ def explain(result, s):
     notes = []
     m_data = reverse_exponent(V, I)
     if np.isfinite(m_data):
-        if m_data > 1.2:
+        if m_data > 1.2 and TERM_LEAK not in result.allowed_terms:
+            notes.append(f"Обратная ветвь сверхлинейна: при V < −1 В |I| ∝ |V|^{m_data:.2f}. Простой "
+                         "диод с шунтом R_sh даёт на ней только прямую линию — это ожидаемая погрешность "
+                         "базовой модели. Изгиб описывает нелинейная утечка I_L·|V|^m — режим «Расширенная».")
+        elif m_data > 1.2:
             notes.append(f"Обратная ветвь сверхлинейна: при V < −1 В |I| ∝ |V|^{m_data:.2f}. Шунт R_sh "
                          "даёт только прямую линию, поэтому нужна нелинейная утечка I_L·|V|^m.")
         elif m_data < 0.8:
@@ -535,7 +553,7 @@ def explain(result, s):
         else:
             notes.append(f"Верх прямой ветви: сопротивление цепи (dV/dI минус n·kT/qI диода) ≈ {text} Ом — "
                          "последовательное сопротивление почти постоянно.")
-    for cand in result.candidates:
+    for cand in result.candidates if len(result.candidates) > 1 else ():
         name = ", ".join(TERMS[t][0] for t in cand.terms) or "минимальная модель"
         mark = "выбрана" if cand.accepted else "отклонена"
         notes.append(f"Вариант «{name}»: ошибка {100 * cand.error:.2f} %, BIC = {cand.bic:.0f} — {mark}.")

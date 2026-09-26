@@ -513,26 +513,41 @@ def test_tau0_estimate_reports_when_current_is_shunt_only():
 
 
 def test_modes_select_model_and_editable_fields():
-    basic = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC})
+    """Базовая — простой диод; расширенная — модель на выбор; «Подгонка» — физическая."""
+    basic = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC,
+                                  "I_L": 1e-5, "I_mod": 0.1})
     assert basic.model == ph.MODEL_EMPIRICAL
-    for mode in (presets.MODE_EXTENDED, presets.MODE_FIT):
-        assert presets.to_structure({"mode": mode}).model == ph.MODEL_PHYSICAL
+    assert basic.I_L == 0 and basic.I_mod == float("inf") and basic.vbi_method == ph.VBI_BOLTZMANN
+    assert presets.to_structure({"mode": presets.MODE_EXTENDED}).model == presets.DEFAULT_EXTENDED_MODEL
+    for model in presets.EXTENDED_MODELS:
+        assert presets.to_structure({"mode": presets.MODE_EXTENDED, "extended_model": model}).model == model
+    assert presets.to_structure({"mode": presets.MODE_FIT,
+                                 "extended_model": ph.MODEL_TWO_DIODE}).model == ph.MODEL_PHYSICAL
     basic_keys = presets.editable_keys(presets.MODE_BASIC)
+    assert basic_keys == presets.BASIC_KEYS
+    assert {"n_emp", "J0_emp", "Rs", "Rsh", "D_um", "T"} <= basic_keys
+    assert {"I_L", "m_leak", "I_mod", "J01_2d", "J02_2d", "T_rho", "h_um", "D_inner_um"}.isdisjoint(basic_keys)
     extended = presets.editable_keys(presets.MODE_EXTENDED)
     fit = presets.editable_keys(presets.MODE_FIT)
-    # n и J₀ (6.3) — только базовый режим; расширенный — всё измеряемое; подгонка — плюс неизмеряемое
     assert basic_keys - presets.MODEL_KEYS < extended < fit
-    assert not presets.MODEL_KEYS & (extended | fit)
+    assert presets.CIRCUIT_KEYS <= extended
     assert {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub", "N_dis", "implant_dose"} <= extended
     assert {"mu_n", "tau0_bg", "sigma_R_epi", "n2"}.isdisjoint(extended)
-    # эквивалентная схема (R_s, I_mod, R_sh, I_L, m) — во всех режимах
-    assert presets.CIRCUIT_KEYS <= basic_keys and presets.CIRCUIT_KEYS <= extended
     assert fit | presets.MODEL_KEYS == {s.key for s in presets.NUMERIC_PARAMS}
-    # поля другой модели тока базового режима не нужны
-    two = presets.editable_keys(presets.MODE_BASIC, ph.MODEL_TWO_DIODE)
+    two = presets.editable_keys(presets.MODE_EXTENDED, ph.MODEL_TWO_DIODE)
     assert {"J01_2d", "J02_2d"} <= two and not presets.EMPIRICAL_KEYS & two
-    s2 = presets.to_structure({"mode": presets.MODE_BASIC, "basic_model": ph.MODEL_TWO_DIODE})
-    assert s2.model == ph.MODEL_TWO_DIODE
+    # где поле откроется и какой модели оно нужно — для подсказок у закрытых полей
+    assert presets.mode_where_editable("I_L") == presets.MODE_EXTENDED
+    assert presets.mode_where_editable("mu_n") == presets.MODE_FIT
+    assert presets.model_for_field("J01_2d") == ph.MODEL_TWO_DIODE
+
+
+def test_old_basic_two_diode_preset_opens_in_extended(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text('{"format": "mesa-diode-preset/1", "params": {"mode": "basic", '
+                    '"basic_model": "two_diode"}}', encoding="utf-8")
+    params = presets.load_preset(path).params
+    assert params["mode"] == presets.MODE_EXTENDED and params["extended_model"] == ph.MODEL_TWO_DIODE
 
 
 def test_empty_field_outside_mode_uses_default():
@@ -625,7 +640,7 @@ def test_iv_depends_on_weakly_doped_side():
                   **changes}
         return ph.solve_iv(presets.to_structure(params), V).I
 
-    assert abs(current(N_i=2.9e14)[0]) > 5 * abs(current(N_i=2.9e17)[0])      # A: N_i важна
+    assert abs(current(N_i=5e14)[0]) > 5 * abs(current(N_i=5e17)[0])      # A: N_i важна
     assert current(ND_plus=1e17)[0] != current(ND_plus=1e20)[0]
     empirical = {"mode": presets.MODE_BASIC}
     same = [ph.solve_iv(presets.to_structure({**empirical, "N_i": n}), V).I for n in (1e14, 1e17)]

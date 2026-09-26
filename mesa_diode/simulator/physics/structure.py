@@ -135,7 +135,8 @@ class Structure:
 
     @cached_property
     def has_surface_layer(self):
-        """Есть ли обогащённый галлием слой у поверхности подложки (п. 2.6)."""
+        """Есть ли обогащённый галлием слой у поверхности подложки: ступенька (1.4)
+        N_A = N_As на глубину d_s (методичка, п. 2.6)."""
         return self.N_As > 0 and self.d_s > 0
 
     def _substrate_stack(self, back_boundary):

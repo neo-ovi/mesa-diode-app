@@ -626,3 +626,19 @@ def test_iv_depends_on_weakly_doped_side():
     empirical = {"mode": presets.MODE_BASIC}
     same = [ph.solve_iv(presets.to_structure({**empirical, "N_i": n}), V).I for n in (1e14, 1e17)]
     assert np.allclose(same[0], same[1])                                       # базовая: по построению
+
+
+# ------------------------------------------ 3.5: подвижность μ(N, T) (2.9) --
+
+def test_mobility_doping_and_temperature():
+    mu_n, mu_p = ph.mobility(1e13)
+    assert (mu_n, mu_p) == (GE.mu_n_max, GE.mu_p_max)                      # g = 1 при малых N
+    assert ph.mobility(1e18)[0] == pytest.approx(0.404 * GE.mu_n_max)       # [Зи, рис. 18]
+    assert ph.mobility(1e18)[1] == pytest.approx(0.180 * GE.mu_p_max)
+    assert ph.lattice_mobility(330.0)[0] == pytest.approx(GE.mu_n_max * 1.1 ** -1.66)
+    # кривая Ирвина: ρ монотонно падает с N, p-Ge при 10¹⁶ ≈ 0.45 Ом·см
+    Ns = np.logspace(15, 20, 30)
+    rho = [ph.resistivity(N, 300.0) for N in Ns]
+    assert all(a > b for a, b in zip(rho, rho[1:]))
+    assert ph.resistivity(1e16, 300.0) == pytest.approx(0.447, rel=0.02)
+    assert ph.resistivity(1e16, 300.0, kind="n") < ph.resistivity(1e16, 300.0)

@@ -115,20 +115,60 @@ def degeneracy_thresholds(T, mat=GE, etas=(-3.0, -2.0, 0.0)):
     }
 
 
-def resistivity(NA, T, mat=GE):
-    """ρ = 1/[q(μ_n·n₀ + μ_p·p₀)], Ом·см — [Зи, с. 36, ур. (47)];
-    n₀, p₀ по (2.4), μ — чистого материала (§4)."""
-    p0, n0 = equilibrium_carriers(NA, intrinsic_concentration(T, mat))
-    return 1.0 / (Q * (mat.mu_n_max * n0 + mat.mu_p_max * p0))
+def lattice_mobility(T, mat=GE):
+    """(2.9а) μ_L(T) = μ_L(300 K)·(T/300)^{−α}, см²/(В·с) — рассеяние на решётке;
+    μ_L(300 K) — [Ioffe-Ge-e], α_n = 1.66, α_p = 2.33 для Ge [Зи, с. 35].
+    Возвращает (μ_n, μ_p)."""
+    t = T / 300.0
+    return mat.mu_n_max * t ** -mat.mu_T_exp_n, mat.mu_p_max * t ** -mat.mu_T_exp_p
+
+
+def doping_factor(N, mat=GE):
+    """g(N) = μ(N)/μ(N → 0) — рассеяние на примеси [Зи, с. 34, рис. 18]:
+    интерполяция по lg N; ниже таблицы g = 1, выше — продолжение последнего
+    участка в логарифмах. Возвращает (g_n, g_p)."""
+    if not mat.mu_doping or N <= 0:
+        return 1.0, 1.0
+    table = np.array(mat.mu_doping)
+    lg = np.log10(N)
+    if lg <= table[0, 0]:
+        return 1.0, 1.0
+    out = []
+    for col in (1, 2):
+        if lg <= table[-1, 0]:
+            out.append(float(10 ** np.interp(lg, table[:, 0], np.log10(table[:, col]))))
+        else:
+            slope = (np.log10(table[-1, col]) - np.log10(table[-2, col])) / (table[-1, 0] - table[-2, 0])
+            out.append(float(10 ** (np.log10(table[-1, col]) + slope * min(lg - table[-1, 0], 1.0))))
+    return tuple(out)
+
+
+def mobility(N, T=300.0, mat=GE):
+    """(2.9) μ_n,p(N, T) = μ_L(T)·g(N), см²/(В·с): подвижность основных носителей
+    слоя с полной концентрацией примеси N. Возвращает (μ_n, μ_p)."""
+    mu_n, mu_p = lattice_mobility(T, mat)
+    g_n, g_p = doping_factor(N, mat)
+    return mu_n * g_n, mu_p * g_p
+
+
+def resistivity(N, T, mat=GE, kind="p"):
+    """(2.8) ρ = 1/[q(μ_n·n₀ + μ_p·p₀)], Ом·см — [Зи, с. 36, ур. (47)]; n₀, p₀ по
+    (2.4), μ(N, T) по (2.9). kind — тип слоя (p: N — акцепторы, n — доноры).
+    Для N ≫ n_i это кривая Ирвина ρ(N) [Зи, с. 39, рис. 22]."""
+    majority, minority = equilibrium_carriers(N, intrinsic_concentration(T, mat))
+    n0, p0 = (minority, majority) if kind == "p" else (majority, minority)
+    mu_n, mu_p = mobility(N, T, mat)
+    return 1.0 / (Q * (mu_n * n0 + mu_p * p0))
 
 
 def resistivity_max(T, mat=GE):
     """ρ_max = 1/(2q·n_i·√(μ_n·μ_p)), Ом·см — наибольшее ρ материала при T.
 
     Следует из (2.8) при n₀p₀ = n_i² (2.4): проводимость q(μ_n·n₀ + μ_p·n_i²/n₀)
-    минимальна при n₀ = n_i·√(μ_p/μ_n) [Зи, с. 36, ур. (47)]. Больше ρ_max не
-    бывает: собственные носители проводят ток при любом легировании."""
-    return 1.0 / (2.0 * Q * intrinsic_concentration(T, mat) * np.sqrt(mat.mu_n_max * mat.mu_p_max))
+    минимальна при n₀ = n_i·√(μ_p/μ_n) [Зи, с. 36, ур. (47)]; μ — решёточные при T
+    (2.9а), примеси почти нет. Методичка, п. 10.1а."""
+    mu_n, mu_p = lattice_mobility(T, mat)
+    return 1.0 / (2.0 * Q * intrinsic_concentration(T, mat) * np.sqrt(mu_n * mu_p))
 
 
 def acceptor_from_resistivity(rho, T, mat=GE):
@@ -153,8 +193,9 @@ def acceptor_from_resistivity(rho, T, mat=GE):
             f"T = {T:g} К ({rho_max:.1f} Ом·см): такой подложки не бывает, N_{{A}} найти нельзя. "
             f"Причина: даже в чистом (собственном) {mat.name} ток переносят собственные носители "
             f"n_{{i}} = {ni:.2g} см⁻³, поэтому ρ ≤ ρ_max = 1/(2q·n_{{i}}·√(μ_{{n}}μ_{{p}})) (2.8). "
-            "n_{i} быстро растёт с температурой, и ρ_max падает: около 60 Ом·см при 300 К и "
-            "13 Ом·см при 330 К. Что сделать: ρ из паспорта пластины измерено при комнатной "
+            f"n_{{i}} быстро растёт с температурой, и ρ_max падает: около {resistivity_max(300.0, mat):.0f} "
+            f"Ом·см при 300 К и {resistivity_max(330.0, mat):.0f} Ом·см при 330 К. Что сделать: ρ из "
+            "паспорта пластины измерено при комнатной "
             "температуре — укажите её в поле «T изм. ρ» (не температуру образца); если ρ "
             "измерено при этой температуре — проверьте значение и единицы."]
     if rho > rho_zero:

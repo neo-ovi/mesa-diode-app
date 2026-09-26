@@ -80,5 +80,5 @@ def test_passport_resistivity_is_read_at_measurement_temperature():
     cold = presets.to_structure({"rho_sub": 40.0, "T": 300.0})
     assert hot.substrate[0] == cold.substrate[0]        # N_A не зависит от T образца
     assert ph.resistivity_max(300.0) == pytest.approx(59.8, rel=0.01)
-    assert ph.resistivity_max(330.0) == pytest.approx(13.1, rel=0.01)
+    assert ph.resistivity_max(330.0) == pytest.approx(15.9, rel=0.01)   # μ ∝ T^−α (2.9а)
     assert not np.isfinite(presets.to_structure({"rho_sub": 40.0, "T_rho": 330.0}).substrate[0])

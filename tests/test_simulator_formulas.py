@@ -33,7 +33,8 @@ FORBIDDEN = (r"\text", r"\operatorname", r"\begin")
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 # Формулы модели — в docstring physics.py, формулы автоподгонки (§6.7) — в fitting.py.
 PHYSICS_SOURCE = "\n".join(Path(m.__file__).read_text(encoding="utf-8")
-                           for m in (ph, importlib.import_module("mesa_diode.simulator.fitting")))
+                           for m in (ph, importlib.import_module("mesa_diode.simulator.fitting"),
+                                     importlib.import_module("mesa_diode.simulator.defects")))
 
 
 def _blocks(kind):

@@ -35,6 +35,7 @@ from mesa_diode.simulator import help as help_module
 from mesa_diode.simulator import hints
 from mesa_diode.simulator.widgets import Tooltip, bind_wheel, format_value, wheel_step
 from mesa_diode.simulator import datafile
+from mesa_diode.simulator.defects_window import open_defects_window
 from mesa_diode.simulator.diagram import draw_mesa_diagram
 from mesa_diode.simulator.plot_utils import (
     adaptive_point_count, adaptive_voltage_range, auto_scale, robust_value_limits,
@@ -71,6 +72,7 @@ SHORT_LABELS = {
     "n2": "n₂ (ОПЗ)", "Rs": "R_s", "Rsh": "R_sh", "I_L": "I_L", "m_leak": "m",
     "n_emp": "n (6.3)", "J0_emp": "J₀ (6.3)", "J01_2d": "J₀₁ (n = 1)", "J02_2d": "J₀₂ (n = 2)", "I_mod": "I_mod (R_s(I))",
     "afm_rms_nm": "RMS (АСМ)", "afm_defects": "дефекты (АСМ)", "xrd_fwhm": "FWHM (XRD)",
+    "xrd_instrument": "φ прибора (XRD)", "xrd_intrinsic": "φ естеств. (XRD)",
     "hall_mu": "μ Холла (i-слой)", "implant_dose": "доза n⁺ Q", "implant_energy": "энергия ионов",
     "anneal_T": "T отжига", "growth_T": "T роста",
 }
@@ -93,7 +95,8 @@ POSITIVE_KEYS = ("D_um", "d_epi_um", "h_um", "d_n_um", "d_sub_um", "ND_plus", "N
                  "rho_sub", "T", "T_rho", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
                  "tau0_bg", "n2", "Rsh", "m_leak", "D_inner_um", "n_emp", "J0_emp")
 NONNEGATIVE_KEYS = ("N_dis", "sigma_R_epi", "sigma_R_sub", "Rs", "I_L",
-                    "afm_rms_nm", "afm_defects", "xrd_fwhm", "hall_mu", "implant_dose",
+                    "afm_rms_nm", "afm_defects", "xrd_fwhm", "xrd_instrument", "xrd_intrinsic",
+                    "hall_mu", "implant_dose",
                     "implant_energy")
 AUTO_COLOR = "#1a5fd0"   # поля, заполненные автофитом
 WHEEL_DELAY_MS = 400   # пересчёт после паузы в прокрутке колеса
@@ -205,6 +208,8 @@ class MesaApp(tk.Tk):
         data_menu.add_command(label="Загрузить эксперим. ВАХ (файл)...", command=self.load_experimental_iv)
         data_menu.add_command(label="Загрузить эксперим. ВФХ (файл)...", command=self.load_experimental_cv)
         data_menu.add_command(label="Формат файлов данных и примеры", command=self.show_data_format)
+        data_menu.add_command(label="Методы дефектов: травление, АСМ, XRD...",
+                              command=lambda: open_defects_window(self))
         data_menu.add_separator()
         data_menu.add_command(label="Очистить экспериментальные данные", command=self.clear_experimental)
         menubar.add_cascade(label="Данные", menu=data_menu)
@@ -233,7 +238,9 @@ class MesaApp(tk.Tk):
               "амперы; другие единицы — подписью в заголовке). Формат — «Данные → Формат файлов»."),
              ("Загрузить ВФХ", self.load_experimental_cv, "CSV, TXT или Excel: столбцы V, C (вольты, "
               "фарады; другие единицы — подписью в заголовке). Формат — «Данные → Формат файлов»."),
-             ("Очистить данные", self.clear_experimental, "Убрать загруженные ВАХ и ВФХ.")),
+             ("Очистить данные", self.clear_experimental, "Убрать загруженные ВАХ и ВФХ."),
+             ("Методы дефектов", lambda: open_defects_window(self),
+              "Сравнение ямок травления (EPD) с XRD и АСМ; калибровка неразрушающего контроля.")),
             (("Сохранить набор", self.save_preset, "Все поля, файлы измерений и метаданные — в JSON."),
              ("Загрузить набор", self.load_preset, "Открыть сохранённый набор образца."),
              ("Опорный", self.reset_to_reference, "Опорный набор из каталога данных."),

@@ -32,9 +32,10 @@ MATH = MathTextParser("agg")
 FORBIDDEN = (r"\text", r"\operatorname", r"\begin")
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 # Формулы модели — в docstring physics.py, формулы автоподгонки (§6.7) — в fitting.py.
-PHYSICS_SOURCE = "\n".join(Path(m.__file__).read_text(encoding="utf-8")
-                           for m in (ph, importlib.import_module("mesa_diode.simulator.fitting"),
-                                     importlib.import_module("mesa_diode.simulator.defects")))
+PHYSICS_SOURCE = "\n".join(
+    [p.read_text(encoding="utf-8") for p in sorted(Path(ph.__file__).parent.glob("*.py"))]
+    + [Path(importlib.import_module(f"mesa_diode.simulator.{m}").__file__).read_text(encoding="utf-8")
+       for m in ("fitting", "defects", "models")])
 
 
 def _blocks(kind):

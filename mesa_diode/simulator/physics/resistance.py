@@ -35,7 +35,8 @@ def layer_resistivities(s):
 
 def series_resistance_estimate(s):
     """Объёмная часть R_s, Ом: (6.12) n⁺ под окном кольца, (6.13) слои поперёк,
-    (6.14) λ растекания по обогащённому слою, (6.15) подложка. Вывод — методичка, п. 9.5."""
+    (6.14) λ растекания по обогащённому слою, оставшемуся вокруг мезы после
+    травления, (6.15) подложка. Вывод — методичка, п. 9.5."""
     rho = layer_resistivities(s)
     a = s.D / 2.0
     r_win = min(s.D_inner, s.D) / 2.0
@@ -48,7 +49,13 @@ def series_resistance_estimate(s):
     if s.has_surface_layer:
         vertical += rho["surf"] * s.d_s
         t = max(s.d_sub - s.d_s, 1e-7)
-        lam = math.sqrt(rho["sub"] * t * s.d_s / rho["surf"])
+        # вокруг мезы травление снимает слой на h − d_epi: растекание — по остатку
+        d_field = max(s.d_s - max(s.h - s.d_epi, 0.0), 0.0)
+        lam = math.sqrt(rho["sub"] * t * d_field / rho["surf"])
+        if d_field < s.d_s:
+            notes.append(f"Травление глубже эпитаксии на {(s.h - s.d_epi) * 1e4:.3g} мкм снимает обогащённый "
+                         f"слой вокруг мезы: для растекания остаётся {d_field * 1e4:.3g} мкм из "
+                         f"{s.d_s * 1e4:.3g} мкм (6.14).")
     parts["слои поперёк (6.13)"] = vertical / s.area
 
     def spreading(radius):
@@ -59,5 +66,5 @@ def series_resistance_estimate(s):
         notes.append(f"Обогащённый слой растекает ток на λ ≈ {lam * 1e4:.3g} мкм за край мезы (6.14): "
                      f"сопротивление подложки {spreading(a + lam):.3g} Ом вместо {spreading(a):.3g} Ом "
                      "без слоя.")
-    notes.append("Контактное сопротивление в оценку не входит: R_s из подгонки должно быть не меньше.")
+    notes.append("Контактное сопротивление в оценку не входит: R_s из подгонки обычно больше.")
     return ResistanceEstimate(parts=parts, total=sum(parts.values()), rho=rho, spread_length=lam, notes=notes)

@@ -326,7 +326,7 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     for terms in _variants(base, lock):
         if progress:
             progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
-        # d_s подбирается, только если обогащённый слой задан (N_As > 0)
+        # d_s подбирается, только если обогащённый слой задан (N_As > 0 и d_s > 0)
         used = [k for k in core(model) if k != "d_s" or base.has_surface_layer]
         used += [p for t in terms for p in TERMS[t][1]]
         keys = [k for k in used if k not in lock]

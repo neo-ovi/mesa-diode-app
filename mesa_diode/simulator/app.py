@@ -63,7 +63,7 @@ BOUNDARY_TITLE = "Граничные условия и опции"
 SIDEBAR_WIDTH = 400
 # Короткие подписи в основном окне; полные — в таблице параметров окна формул.
 SHORT_LABELS = {
-    "D_um": "D (мезы)", "D_inner_um": "d кольца (схема)", "d_epi_um": "d_epi",
+    "D_um": "D (мезы)", "D_inner_um": "d кольца (окно)", "d_epi_um": "d_epi",
     "h_um": "h (травление)", "d_n_um": "d_n (n⁺)", "d_sub_um": "d_sub",
     "ND_plus": "N_D⁺", "N_i": "N_i", "rho_sub": "ρ_sub", "N_As": "N_As (Ga у пов.)",
     "d_s_um": "d_s (обогащ.)", "T_rho": "T изм. ρ", "T": "T",

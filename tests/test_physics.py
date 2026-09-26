@@ -681,6 +681,17 @@ def test_series_resistance_estimate_components():
         min(thin.rho["sub"] / (4 * a), thin.rho["sub"] * 350e-4 / (math.pi * a * a)))
 
 
+def test_etch_through_surface_layer_removes_spreading():
+    """Травление глубже эпитаксии снимает обогащённый слой вокруг мезы (6.14)."""
+    base = {"N_As": 1e18, "d_s_um": 0.5, "d_epi_um": 2.5}
+    kept = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 2.5}))
+    thinner = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 2.7}))
+    gone = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 3.0}))
+    assert thinner.spread_length == pytest.approx(kept.spread_length * math.sqrt(0.3 / 0.5))
+    assert gone.spread_length == 0.0 and any("снимает" in n for n in gone.notes)
+    assert kept.total < thinner.total < gone.total
+
+
 def test_autofill_series_resistance_from_geometry():
     values = {**presets.DEFAULT_PARAMS, "Rs": None}
     filled = presets.autofill(values, ["Rs"])

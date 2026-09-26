@@ -599,7 +599,7 @@ def test_finite_velocity_boundary_limits():
 
 
 def test_layer_boundary_between_sink_and_reflect():
-    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 3e16, "ND_plus": 1e19}
+    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 4e16, "ND_plus": 2e19}
     parts = {bc: ph.saturation_current_density_parts(presets.to_structure({**base, "bc_B_n": bc}), 0.0)[0]
              for bc in (ph.SINK, ph.REFLECT, ph.LAYER)}
     assert parts[ph.REFLECT] < parts[ph.LAYER] < parts[ph.SINK]

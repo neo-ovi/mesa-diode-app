@@ -6,57 +6,19 @@
 основной пакет (подгонку под данные образца из приватного репозитория).
 Симулятор не требует MESA_DATA_DIR: пользователь может сравнить модель
 с любым файлом на своём диске.
+
+Чтение и проверка файла — в `datafile` (CSV, TXT, Excel; единицы по
+заголовку; замечания с подсказками). Здесь — прежний простой интерфейс.
 """
 
-import csv
-
-import numpy as np
+from mesa_diode.simulator import datafile
 
 
-def load_xy_file(path):
-    """
-    Загружает двухколоночный текстовый/CSV файл (X, Y) с диска.
+def load_xy_file(path, kind=datafile.KIND_IV):
+    """(V, величина) в СИ, отсортированные по V.
 
-    Поддерживаемые разделители: запятая, точка с запятой, таб, пробел(ы)
-    (автоопределение через csv.Sniffer, с запасным вариантом — разбиение
-    по пробелам). Строки, которые не удаётся разобрать как два числа
-    (например, заголовок столбцов), молча пропускаются.
-
-    ВАЖНО — ожидаемые единицы измерения (система СИ):
-      * для ВАХ: 1-й столбец — напряжение V в вольтах, 2-й столбец — ток I в амперах;
-      * для ВФХ: 1-й столбец — напряжение V в вольтах, 2-й столбец — ёмкость C в фарадах.
-    Если ваши экспериментальные данные в других единицах (например, ток в мА
-    или ёмкость в пФ) — пересчитайте их в СИ перед загрузкой, либо добавьте
-    множитель прямо здесь (после строки "arr = np.array(rows)"), например:
-        arr[:, 1] *= 1e-3   # если 2-й столбец был в мА -> переводим в А
-    """
-    rows = []
-    with open(path, "r", encoding="utf-8-sig") as f:
-        sample = f.read(2048)
-        f.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t ")
-            reader = csv.reader(f, delimiter=dialect.delimiter)
-        except csv.Error:
-            reader = (line.split() for line in f)  # запасной разбор по пробелам
-
-        for row in reader:
-            if len(row) < 2:
-                continue
-            try:
-                x = float(str(row[0]).strip().replace(",", "."))
-                y = float(str(row[1]).strip().replace(",", "."))
-                rows.append((x, y))
-            except ValueError:
-                continue  # заголовок / комментарий / пустая строка — пропускаем
-
-    if not rows:
-        raise ValueError(
-            "Не удалось прочитать числовые данные из файла.\n"
-            "Ожидается минимум два числовых столбца (V и I, либо V и C)."
-        )
-
-    arr = np.array(rows, dtype=float)
-    # --- при необходимости пересчёта единиц измените множители здесь ---
-    order = np.argsort(arr[:, 0])
-    return arr[order, 0], arr[order, 1]
+    ВАХ: V в вольтах, I в амперах; ВФХ: V в вольтах, C в фарадах. Формат и
+    проверки — datafile.FORMAT_HELP. При непригодном файле — datafile.DataFileError
+    (подкласс ValueError) с причинами и подсказками."""
+    voltage, value, _report = datafile.load(path, kind)
+    return voltage, value

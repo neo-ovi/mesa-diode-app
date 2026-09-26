@@ -95,6 +95,17 @@ def draw_mesa_diagram(ax, p):
             "подложка p-Ge, N_A", ha="center", va="center", fontsize=11)
     _callout(ax, SUBSTRATE["x1"] + 0.5, (SUBSTRATE["y0"] + SUBSTRATE["y1"]) / 2, 4)
 
+    # --- обогащённый галлием слой у поверхности подложки (методичка, п. 2.6) ---
+    surface = getattr(p, "surface_layer", False)
+    if surface:
+        band = 0.45
+        ax.add_patch(Rectangle(
+            (SUBSTRATE["x0"], SUBSTRATE["y1"] - band), SUBSTRATE["x1"] - SUBSTRATE["x0"], band,
+            facecolor="#7fb2e5", edgecolor="black", linewidth=0.8))
+        ax.text(SUBSTRATE["x0"] + 0.25, SUBSTRATE["y1"] - band / 2, f"p⁺ (Ga), d_s = {p.d_s_um:g} мкм",
+                ha="left", va="center", fontsize=7)
+        _callout(ax, SUBSTRATE["x0"] - 0.5, SUBSTRATE["y1"] - band / 2, 5)
+
     # --- меза: эпитаксия n⁺ / i (прямоугольник, без искусственного скоса) ---
     ax.add_patch(Rectangle(
         (MESA["x0"], MESA["y0"]), MESA["x1"] - MESA["x0"], MESA["y1"] - MESA["y0"],
@@ -159,7 +170,8 @@ def draw_mesa_diagram(ax, p):
             ha="left", va="center", fontsize=9, fontweight="bold", rotation=90)
 
     # --- расшифровка номеров — одной строкой под схемой, как в оригинале ---
-    ax.text((XLIM[0] + XLIM[1]) / 2 + 0.6, YLIM[0] + 0.3,
-            "1 — кольцо   2 — тыльный контакт   "
-            "3 — меза n⁺/i   4 — подложка",
+    legend = "1 — кольцо   2 — тыльный контакт   3 — меза n⁺/i   4 — подложка"
+    if surface:
+        legend += "   5 — обогащённый слой"
+    ax.text((XLIM[0] + XLIM[1]) / 2 + 0.6, YLIM[0] + 0.3, legend,
             ha="center", va="bottom", fontsize=8, color="#333333")

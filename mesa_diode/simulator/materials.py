@@ -42,8 +42,22 @@ class Material:
     vth_p: float
     m_cc: float | None = None  # в единицах m0, только для Справочника
     a_angstrom: float | None = None
+    mu_T_exp_n: float = 0.0    # μ_L ∝ T^{−α}: показатели α_n, α_p (2.9а)
+    mu_T_exp_p: float = 0.0
+    mu_doping: tuple = ()      # (lg N, g_n, g_p): g = μ(N)/μ(N → 0) (2.9)
     source: dict = field(default_factory=dict)
 
+
+# Зависимость подвижности от концентрации примеси в Ge при 300 K: g = μ(N)/μ(N → 0)
+# для электронов и дырок, оцифровка [Зи, с. 34, рис. 18] с шагом полдекады
+# (точность отсчёта ≈ 5 %). Абсолютный предел μ(N → 0) берётся из mu_n_max,
+# mu_p_max [Ioffe-Ge-e]; методичка, п. 3.4.
+GE_MOBILITY_DOPING = (
+    (14.0, 1.000, 1.000), (14.5, 0.968, 0.995), (15.0, 0.930, 0.965),
+    (15.5, 0.872, 0.873), (16.0, 0.800, 0.735), (16.5, 0.710, 0.585),
+    (17.0, 0.627, 0.415), (17.5, 0.528, 0.298), (18.0, 0.404, 0.180),
+    (18.5, 0.294, 0.106), (19.0, 0.186, 0.056),
+)
 
 GE = Material(
     name="Ge",
@@ -53,6 +67,8 @@ GE = Material(
     mu_n_max=3900.0, mu_p_max=1900.0,
     vth_n=3.1e7, vth_p=1.9e7,
     m_cc=0.12, a_angstrom=5.658,
+    mu_T_exp_n=1.66, mu_T_exp_p=2.33,
+    mu_doping=GE_MOBILITY_DOPING,
     source={
         "Eg": f"{ZI}, с. 20, табл. на рис. 8",
         "Nc_Nv": IOFFE_GE_B,
@@ -61,6 +77,8 @@ GE = Material(
         "vth": IOFFE_GE_E,
         "m_cc": IOFFE_GE_B,
         "a": IOFFE_SIGE,
+        "mu_T": f"{ZI}, с. 35 (μ_n ∝ T^−1.66, μ_p ∝ T^−2.33 для Ge)",
+        "mu_doping": f"{ZI}, с. 34, рис. 18 (оцифровка; те же данные — кривые Ирвина, с. 39, рис. 22)",
     },
 )
 

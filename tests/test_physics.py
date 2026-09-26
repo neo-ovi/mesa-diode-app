@@ -5,6 +5,8 @@
 репозитория и выполняются tests/test_reference_sets.py через MESA_DATA_DIR.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -170,7 +172,10 @@ def test_scenario_mapping():
     b = a.with_scenario(ph.SCENARIO_B)
     assert (b.n_side.layer, b.p_side.layer) == ("i", "sub")
     assert b.z_j == pytest.approx(3.2 * UM)
-    assert b.n_side.boundary == ph.REFLECT
+    assert b.n_side.boundary == ph.REFLECT and b.n_side.neighbour.layer == "n+"   # умолчание ТЗ
+    assert a.p_side.neighbour.layer == "sub"
+    ui = presets.to_structure({"i_type": presets.I_TYPE_N})                      # умолчание окна
+    assert ui.n_side.boundary == ph.LAYER
     assert rel(ph.resistivity(b.p_side.N, 300.0), 5.0, 1e-6)
 
 
@@ -408,10 +413,11 @@ def test_default_preset_builds_structure_in_calc_units():
     assert presets.to_structure({"i_type": presets.I_TYPE_P}).scenario == ph.SCENARIO_A
 
 
-def test_startup_without_data_dir_is_neutral(monkeypatch):
+def test_startup_without_data_dir_is_model_structure(monkeypatch):
     monkeypatch.delenv("MESA_DATA_DIR", raising=False)
     assert presets.reference_preset() is None
     assert presets.startup_preset().params == presets.DEFAULT_PARAMS
+    assert presets.startup_preset().name == presets.MODEL_PRESET_NAME
 
 
 def test_auto_window_keeps_at_least_three_points_on_sparse_data():
@@ -421,3 +427,274 @@ def test_auto_window_keeps_at_least_three_points_on_sparse_data():
     result = ph.ideality_from_data(Vj + I * 3e5, I, T300)  # сильный изгиб от R_s
     assert result is not None
     assert ((result.V_local >= result.V1) & (result.V_local <= result.V2)).sum() >= 3
+
+
+# ------------------------------------- идеальность: реальные условия данных --
+
+def _dense_iv(n=1.5, I0=2e-6, Rs=120.0, noise=0.0, seed=1, vmax=1.5):
+    """Плотная ВАХ диода с заметным R_s (синтетика, не данные образца)."""
+    from scipy.optimize import brentq
+    Vt = ph.thermal_voltage(T300)
+
+    def current(V):
+        return brentq(lambda I: I - I0 * np.expm1(np.clip((V - I * Rs) / (n * Vt), -700, 700)), -1, 1)
+
+    V = np.linspace(-1.0, vmax, 2500)
+    I = np.array([current(v) for v in V])
+    if noise:
+        I = I * (1 + noise * np.random.default_rng(seed).standard_normal(I.size))
+    return V, I
+
+
+def test_ideality_dense_noisy_data_with_correct_rs():
+    V, I = _dense_iv(noise=0.01)
+    notes = []
+    result = ph.ideality_from_data(V, I, T300, Rs=120.0, diagnostics=notes)
+    assert result.n == pytest.approx(1.5, abs=0.02)
+    assert notes == []
+
+
+def test_ideality_reports_overestimated_rs():
+    V, I = _dense_iv()
+    notes = []
+    result = ph.ideality_from_data(V, I, T300, Rs=500.0, diagnostics=notes)
+    assert any("завышено" in note for note in notes)
+    assert result is None or result.n < 1.5
+
+
+def test_ideality_reports_reason_when_no_forward_points():
+    notes = []
+    assert ph.ideality_from_data(np.array([-1.0, -0.5]), np.array([-1e-6, -5e-7]), T300,
+                                 diagnostics=notes) is None
+    assert notes and "прямой ветви" in notes[0]
+
+
+def test_ideality_ignores_repeated_voltages():
+    V, I = _dense_iv(Rs=0.0, vmax=0.4)
+    V2 = np.concatenate([V, V[::7]])
+    I2 = np.concatenate([I, I[::7]])
+    result = ph.ideality_from_data(V2, I2, T300)
+    assert result.n == pytest.approx(1.5, abs=0.01)
+
+
+# ------------------------------------------ эмпирическая модель и оценка τ₀ --
+
+def test_empirical_model_follows_6_3():
+    s = synth(model=ph.MODEL_EMPIRICAL, J0_emp=1e-5, n_emp=1.4, Rs=0.0, Rsh=float("inf"))
+    V = np.linspace(-0.5, 0.3, 17)
+    r = ph.solve_iv(s, V)
+    expected = s.area * 1e-5 * np.expm1(V / (1.4 * s.Vt))
+    assert np.allclose(r.I, expected, rtol=1e-12)
+    assert set(r.parts) == {"emp", "sh", "L"}
+
+
+def test_empirical_model_ideality_is_recovered():
+    s = synth(model=ph.MODEL_EMPIRICAL, J0_emp=1e-5, n_emp=1.3, Rs=0.0, Rsh=float("inf"))
+    V = np.linspace(0.0, 0.3, 121)
+    assert ph.ideality_from_data(V, ph.solve_iv(s, V).I, T300).n == pytest.approx(1.3, abs=1e-3)
+
+
+def test_tau0_estimate_recovers_model_lifetime():
+    truth = synth(tau0_bg=3e-8, N_dis=1e5, Rsh=1e7)
+    V = np.linspace(-2.0, 0.0, 81)
+    I = ph.solve_iv(truth, V).I
+    guess = synth(tau0_bg=1e-5, N_dis=1e5, Rsh=1e7)   # τ₀ неизвестно
+    est = ph.estimate_tau0_from_reverse(guess, V, I, -1.0)
+    assert est.tau0 == pytest.approx(ph.scr_lifetime(truth), rel=1e-3)
+    assert est.tau0_bg == pytest.approx(3e-8, rel=1e-3)
+
+
+def test_tau0_estimate_reports_when_current_is_shunt_only():
+    s = synth(Rsh=1e3)
+    V = np.linspace(-2.0, 0.0, 21)
+    notes = []
+    assert ph.estimate_tau0_from_reverse(s, V, V / 1e4, -1.0, notes) is None
+    assert notes
+
+
+def test_modes_select_model_and_editable_fields():
+    basic = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC})
+    assert basic.model == ph.MODEL_EMPIRICAL
+    for mode in (presets.MODE_EXTENDED, presets.MODE_FIT):
+        assert presets.to_structure({"mode": mode}).model == ph.MODEL_PHYSICAL
+    basic_keys = presets.editable_keys(presets.MODE_BASIC)
+    extended = presets.editable_keys(presets.MODE_EXTENDED)
+    fit = presets.editable_keys(presets.MODE_FIT)
+    # n и J₀ (6.3) — только базовый режим; расширенный — всё измеряемое; подгонка — плюс неизмеряемое
+    assert basic_keys - presets.MODEL_KEYS < extended < fit
+    assert not presets.MODEL_KEYS & (extended | fit)
+    assert {"d_epi_um", "d_n_um", "d_sub_um", "rho_sub", "N_dis", "implant_dose"} <= extended
+    assert {"mu_n", "tau0_bg", "sigma_R_epi", "n2"}.isdisjoint(extended)
+    # эквивалентная схема (R_s, I_mod, R_sh, I_L, m) — во всех режимах
+    assert presets.CIRCUIT_KEYS <= basic_keys and presets.CIRCUIT_KEYS <= extended
+    assert fit | presets.MODEL_KEYS == {s.key for s in presets.NUMERIC_PARAMS}
+    # поля другой модели тока базового режима не нужны
+    two = presets.editable_keys(presets.MODE_BASIC, ph.MODEL_TWO_DIODE)
+    assert {"J01_2d", "J02_2d"} <= two and not presets.EMPIRICAL_KEYS & two
+    s2 = presets.to_structure({"mode": presets.MODE_BASIC, "basic_model": ph.MODEL_TWO_DIODE})
+    assert s2.model == ph.MODEL_TWO_DIODE
+
+
+def test_empty_field_outside_mode_uses_default():
+    s = presets.to_structure({**presets.DEFAULT_PARAMS, "mu_n": None, "mode": presets.MODE_EXTENDED})
+    assert s.mu_n == presets.DEFAULT_PARAMS["mu_n"]
+
+
+def test_autofill_fills_only_empty_non_stored_fields():
+    values = {**presets.DEFAULT_PARAMS, "N_i": None, "Rs": None, "afm_rms_nm": None}
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_EXTENDED))
+    assert set(filled) == {"N_i", "Rs"}
+    assert filled["N_i"] == (presets.DEFAULT_PARAMS["N_i"], presets.AUTO_DEFAULT)
+
+
+def test_autofill_estimates_nd_plus_from_dose_and_takes_ideality():
+    values = {**presets.DEFAULT_PARAMS, "ND_plus": None, "implant_dose": 1e15, "d_n_um": 0.2,
+              "n_emp": None, "J0_emp": None}
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_EXTENDED))
+    assert filled["ND_plus"][0] == pytest.approx(1e15 / 0.2e-4)
+    assert filled["ND_plus"][1] == presets.AUTO_FROM_DOSE
+    ideality = ph.IdealityResult(n=1.42, dn=0.0, I0=2e-9, V1=0.1, V2=0.2,
+                                 V_local=np.array([]), n_local=np.array([]))
+    filled = presets.autofill(values, presets.editable_keys(presets.MODE_BASIC), ideality)
+    area = np.pi * (values["D_um"] * 1e-4) ** 2 / 4
+    assert filled["n_emp"] == (1.42, presets.AUTO_FROM_IV)
+    assert filled["J0_emp"][0] == pytest.approx(2e-9 / area, rel=1e-2)
+
+
+def test_preset_without_mode_opens_in_fit_mode(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text('{"format": "mesa-diode-preset/1", "params": {"N_i": 1e15}}', encoding="utf-8")
+    preset = presets.load_preset(path)
+    assert preset.params["mode"] == presets.MODE_FIT
+    assert presets.to_structure(preset.params).model == ph.MODEL_PHYSICAL
+
+
+def test_series_resistance_limit_is_close_to_true_rs():
+    for rs in (30.0, 120.0):
+        s = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": presets.MODE_FIT, "Rs": rs,
+                                  "tau0_bg": 3e-8})
+        V = np.linspace(-3, 1.5, 300)
+        limit = ph.series_resistance_limit(V, ph.solve_iv(s, V).I)
+        # dV/dI верха прямой ветви = R_s + nkT/(qI): чуть больше истинного R_s
+        assert rs < limit < 1.1 * rs
+
+
+def test_ideality_failure_text_links_rs_and_gives_solution():
+    from mesa_diode.simulator import hints
+    short, text = hints.ideality_failure_text("a.csv", ["x"], 3000.0, 123.0, found=False)
+    assert short == "R_s завышено"
+    assert "V_j = V − I·R_s" in text and "R_s < 123 Ом" in text and "3000" in text
+    short, text = hints.ideality_failure_text("a.csv", ["окно мало"], 10.0, 123.0, found=False)
+    assert "окно мало" in text and "V₁ … V₂" in text
+    assert hints.ideality_failure_text("a.csv", [], 10.0, 123.0, found=True) == ("", "")
+
+
+# ------------------------------------- 3.3: граница «соседний слой» (4.3а) --
+
+def test_finite_velocity_boundary_limits():
+    u = np.array([1e-3, 0.5, 3.0])
+    assert np.allclose(ph.boundary_factor(u, ph.SINK, r=1e12), 1.0 / np.tanh(u), rtol=1e-6)
+    assert np.allclose(ph.boundary_factor(u, ph.LAYER, r=0.0), np.tanh(u), rtol=1e-12)
+    assert ph.boundary_factor(np.array([1e-9]), ph.LAYER, r=7.0)[0] == pytest.approx(7.0, rel=1e-6)
+
+
+def test_layer_boundary_between_sink_and_reflect():
+    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 4e16, "ND_plus": 2e19}
+    parts = {bc: ph.saturation_current_density_parts(presets.to_structure({**base, "bc_B_n": bc}), 0.0)[0]
+             for bc in (ph.SINK, ph.REFLECT, ph.LAYER)}
+    assert parts[ph.REFLECT] < parts[ph.LAYER] < parts[ph.SINK]
+    # более слабо легированный n⁺ «отражает» хуже → ток дырок больше
+    weak = ph.saturation_current_density_parts(presets.to_structure({**base, "ND_plus": 1e17}), 0.0)[0]
+    assert weak > parts[ph.LAYER]
+
+
+def test_punch_through_current_stays_finite():
+    """Смыкание ОПЗ с границей i/подложка (сценарий A, N_i = 10¹⁴): ток — поток в подложку, не ∝ 1/w."""
+    s = presets.to_structure({"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "N_i": 1e14,
+                              "ND_plus": 1e17})
+    assert ph.neutral_widths(s, -3.0)[2]
+    assert abs(ph.solve_iv(s, np.array([-3.0])).I[0]) < 1e-3
+
+
+def test_iv_depends_on_weakly_doped_side():
+    """Физическая модель: ток задаёт слабо легированная сторона (§6.8 методички)."""
+    V = np.array([-1.0, 0.15])
+
+    def current(**changes):
+        params = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "rho_sub": 40.0, "N_As": 0.0, "Rsh": 1e12,
+                  **changes}
+        return ph.solve_iv(presets.to_structure(params), V).I
+
+    assert abs(current(N_i=2.9e14)[0]) > 5 * abs(current(N_i=2.9e17)[0])      # A: N_i важна
+    assert current(ND_plus=1e17)[0] != current(ND_plus=1e20)[0]
+    empirical = {"mode": presets.MODE_BASIC}
+    same = [ph.solve_iv(presets.to_structure({**empirical, "N_i": n}), V).I for n in (1e14, 1e17)]
+    assert np.allclose(same[0], same[1])                                       # базовая: по построению
+
+
+# ------------------------------------------ 3.5: подвижность μ(N, T) (2.9) --
+
+def test_mobility_doping_and_temperature():
+    mu_n, mu_p = ph.mobility(1e13)
+    assert (mu_n, mu_p) == (GE.mu_n_max, GE.mu_p_max)                      # g = 1 при малых N
+    assert ph.mobility(1e18)[0] == pytest.approx(0.404 * GE.mu_n_max)       # [Зи, рис. 18]
+    assert ph.mobility(1e18)[1] == pytest.approx(0.180 * GE.mu_p_max)
+    assert ph.lattice_mobility(330.0)[0] == pytest.approx(GE.mu_n_max * 1.1 ** -1.66)
+    # кривая Ирвина: ρ монотонно падает с N, p-Ge при 10¹⁶ ≈ 0.45 Ом·см
+    Ns = np.logspace(15, 20, 30)
+    rho = [ph.resistivity(N, 300.0) for N in Ns]
+    assert all(a > b for a, b in zip(rho, rho[1:]))
+    assert ph.resistivity(1e16, 300.0) == pytest.approx(0.447, rel=0.02)
+    assert ph.resistivity(1e16, 300.0, kind="n") < ph.resistivity(1e16, 300.0)
+
+
+# ------------------------------- 3.5: обогащённый слой подложки (N_As, d_s) --
+
+def test_surface_layer_structure_and_boundary_chain():
+    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 5e16, "rho_sub": 50.0,
+            "N_As": 1e18, "d_s_um": 0.5, "d_sub_um": 350.0}
+    b = presets.to_structure(base)
+    assert b.has_surface_layer and b.p_side.layer == "surf" and b.p_side.N == 1e18
+    assert b.p_side.boundary == ph.LAYER and b.p_side.neighbour.layer == "sub"
+    assert b.p_side.neighbour.thickness == pytest.approx((350.0 - 0.5) * UM)
+    no_layer = presets.to_structure({**base, "N_As": 0.0})
+    assert not no_layer.has_surface_layer and no_layer.p_side.layer == "sub"
+    assert b.Vbi > no_layer.Vbi                     # p-сторона легирована сильнее → V_bi больше
+    a = b.with_scenario(ph.SCENARIO_A)
+    assert a.p_side.neighbour.layer == "surf" and a.p_side.neighbour.neighbour.layer == "sub"
+    # сильно легированный слой под p-i-слоем почти отражает электроны → диффузия i-слоя меньше
+    j_with = ph.saturation_current_density_parts(a, 0.0)[1]
+    j_without = ph.saturation_current_density_parts(no_layer.with_scenario(ph.SCENARIO_A), 0.0)[1]
+    assert j_with < j_without
+
+
+def test_series_resistance_estimate_components():
+    s = presets.to_structure({"N_As": 1e18, "d_s_um": 0.5, "rho_sub": 50.0, "D_um": 500.0, "D_inner_um": 300.0})
+    est = ph.series_resistance_estimate(s)
+    assert est.total == pytest.approx(sum(est.parts.values()))
+    assert est.spread_length > 0
+    thin = ph.series_resistance_estimate(presets.to_structure({"N_As": 0.0, "rho_sub": 50.0}))
+    assert est.parts["подложка, растекание (6.15)"] < thin.parts["подложка, растекание (6.15)"]
+    # без слоя — растекание диска ρ/(4a) на толстой подложке
+    a = 250e-4
+    assert thin.parts["подложка, растекание (6.15)"] == pytest.approx(
+        min(thin.rho["sub"] / (4 * a), thin.rho["sub"] * 350e-4 / (math.pi * a * a)))
+
+
+def test_etch_through_surface_layer_removes_spreading():
+    """Травление глубже эпитаксии снимает обогащённый слой вокруг мезы (6.14)."""
+    base = {"N_As": 1e18, "d_s_um": 0.5, "d_epi_um": 2.5}
+    kept = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 2.5}))
+    thinner = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 2.7}))
+    gone = ph.series_resistance_estimate(presets.to_structure({**base, "h_um": 3.0}))
+    assert thinner.spread_length == pytest.approx(kept.spread_length * math.sqrt(0.3 / 0.5))
+    assert gone.spread_length == 0.0 and any("снимает" in n for n in gone.notes)
+    assert kept.total < thinner.total < gone.total
+
+
+def test_autofill_series_resistance_from_geometry():
+    values = {**presets.DEFAULT_PARAMS, "Rs": None}
+    filled = presets.autofill(values, ["Rs"])
+    expected = ph.series_resistance_estimate(presets.to_structure(presets.DEFAULT_PARAMS)).total
+    assert filled["Rs"][0] == pytest.approx(expected, rel=0.01)
+    assert "геометрии" in filled["Rs"][1]

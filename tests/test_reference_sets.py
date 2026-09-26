@@ -109,22 +109,21 @@ def test_gr_share_reference(case):
     assert ph.gr_share_from_ideality(case["n"]) == pytest.approx(case["expected"], abs=case["abs"])
 
 
-# ---------------------------------------- опорный набор из каталога данных --
+# ------------------------- набор для проверки эталонов из каталога данных --
 
 from dataclasses import replace
 
 from mesa_diode.simulator import presets
 
 
-def test_reference_preset_reproduces_reference_values():
-    ref_preset = presets.reference_preset()
-    if ref_preset is None:
-        pytest.skip("в каталоге данных нет опорного набора")
+def test_validation_preset_reproduces_reference_values(validation_preset):
     cases = {c["name"]: c for c in _cases("structures")}
     for scenario, name in ((ph.SCENARIO_B, "Э0-B"), (ph.SCENARIO_A, "Э0-A")):
         if name not in cases:
             continue
-        s = replace(presets.to_structure(ref_preset.params, scenario), vbi_method=ph.VBI_BOLTZMANN)
+        # Эталоны §9 (ТЗ) считались без обогащённого слоя подложки (методичка, п. 2.6).
+        params = {**validation_preset.params, "N_As": 0.0, "d_s_um": 0.0}
+        s = replace(presets.to_structure(params, scenario), vbi_method=ph.VBI_BOLTZMANN)
         quantities = _quantities(s)
         for key, (expected, tol, *abs_tol) in cases[name]["expected"].items():
             value = float(quantities[key]())

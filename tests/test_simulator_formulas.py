@@ -5,6 +5,7 @@ GUI не поднимается: проверяются данные реест�
 нет Tk (Linux-CI без python3-tk), модуль импортируется с заглушкой.
 """
 
+import importlib
 import re
 import sys
 from pathlib import Path
@@ -30,7 +31,11 @@ from mesa_diode.simulator import presets
 MATH = MathTextParser("agg")
 FORBIDDEN = (r"\text", r"\operatorname", r"\begin")
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-PHYSICS_SOURCE = Path(ph.__file__).read_text(encoding="utf-8")
+# Формулы модели — в docstring physics.py, формулы автоподгонки (§6.7) — в fitting.py.
+PHYSICS_SOURCE = "\n".join(
+    [p.read_text(encoding="utf-8") for p in sorted(Path(ph.__file__).parent.glob("*.py"))]
+    + [Path(importlib.import_module(f"mesa_diode.simulator.{m}").__file__).read_text(encoding="utf-8")
+       for m in ("fitting", "defects", "models")])
 
 
 def _blocks(kind):
@@ -134,3 +139,18 @@ def test_split_index_markup_sub_and_sup():
 def test_split_index_markup_keeps_plain_underscores():
     text = "physics.solve_iv и estimate_grading_m"
     assert fm.split_index_markup(text) == [(text, None)]
+
+
+def test_fit_guide_covers_modes_groups_boundaries_and_tables():
+    guide = dict(fm.fit_guide())
+    text = "\n".join(p for paragraphs in guide.values() for p in paragraphs)
+    for spec in presets.NUMERIC_PARAMS:
+        assert spec.label in text
+    for label in ph.BOUNDARY_LABELS.values():
+        assert label in text.lower()
+    assert "3900" in text and "1900" in text and "Ioffe" in text
+    assert "$" not in text and "\\" not in text
+    assert fm.parameter_modes("D_um") == "Б, Р, П"
+    assert fm.parameter_modes("d_epi_um") == "Р, П"
+    assert fm.parameter_modes("mu_n") == "П"
+    assert fm.parameter_modes("n_emp") == "Б"

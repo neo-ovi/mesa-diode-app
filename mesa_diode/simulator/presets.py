@@ -2,11 +2,12 @@
 """Наборы образцов (ТЗ §5.4): сохранение и загрузка в JSON.
 
 Набор хранит все параметры основного окна (§5.3) в единицах интерфейса,
-пути к файлам ВАХ/ВФХ и метаданные образца. Параметры реальных образцов
-в этом репозитории не хранятся: наборы лежат в каталоге данных
-(MESA_DATA_DIR/samples/<образец>/preset.json), опорный помечен
-"reference": true. Без каталога данных программа стартует с модельной
-структуры DEFAULT_PARAMS (не образец; методичка, п. 2.7).
+пути к файлам ВАХ/ВФХ и метаданные образца. Опорный образец — модельная
+структура DEFAULT_PARAMS (не образец; методичка, п. 2.7). Параметры
+реальных образцов в этом репозитории не хранятся: их наборы лежат в
+каталоге данных (MESA_DATA_DIR/samples/<образец>/preset.json); набор с
+"reference": true, если он там есть, заменяет модельную структуру при
+запуске и по кнопке «Опорный».
 """
 
 import json
@@ -143,11 +144,10 @@ def current_model(params):
         return params.get("basic_model") or ph.MODEL_EMPIRICAL
     return MODE_MODEL.get(mode, ph.MODEL_PHYSICAL)
 
-# Значения по умолчанию — модельная опорная структура (не параметры какого-либо образца).
+# Опорный образец — модельная структура (не параметры какого-либо образца): методичка, п. 2.7.
 DEFAULT_PARAMS = {
     "substrate": "Ge",
     "i_type": I_TYPE_N,
-    # Модельная опорная структура (не образец): методичка, п. 2.7.
     "D_um": 500.0,
     "D_inner_um": 300.0,
     "d_epi_um": 2.5,
@@ -262,8 +262,11 @@ class Preset:
         return [p if Path(p).is_absolute() else base / p for p in self.files.get(kind, [])]
 
 
+MODEL_PRESET_NAME = "модельная структура (опорный образец)"
+
+
 def default_preset():
-    return Preset(name="по умолчанию", params=dict(DEFAULT_PARAMS))
+    return Preset(name=MODEL_PRESET_NAME, params=dict(DEFAULT_PARAMS))
 
 
 def to_structure(params, scenario=None):
@@ -314,7 +317,8 @@ def data_presets():
 
 
 def reference_preset():
-    """Опорный набор из каталога данных или None."""
+    """Набор с "reference": true из каталога данных или None (тогда опорный —
+    модельная структура, default_preset)."""
     for path in data_presets():
         try:
             preset = load_preset(path)
@@ -326,5 +330,5 @@ def reference_preset():
 
 
 def startup_preset():
-    """Набор при запуске: опорный из каталога данных, иначе нейтральный."""
+    """Набор при запуске: помеченный опорным в каталоге данных, иначе модельная структура."""
     return reference_preset() or default_preset()

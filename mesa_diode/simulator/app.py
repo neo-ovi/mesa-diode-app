@@ -244,7 +244,8 @@ class MesaApp(tk.Tk):
               "Сравнение ямок травления (EPD) с XRD и АСМ; калибровка неразрушающего контроля.")),
             (("Сохранить набор", self.save_preset, "Все поля, файлы измерений и метаданные — в JSON."),
              ("Загрузить набор", self.load_preset, "Открыть сохранённый набор образца."),
-             ("Опорный", self.reset_to_reference, "Опорный набор из каталога данных."),
+             ("Опорный", self.reset_to_reference, "Модельная структура (методичка, п. 2.7): не образец, "
+              "пример для проверки и обучения."),
              ("Новый образец", self.new_sample, "Все поля пустые, режим «Расширенная модель».")),
             (("Формулы и параметры", self.open_formulas_window, "Что означает каждый параметр, формулы "
               "модели и справочные величины."),
@@ -732,14 +733,9 @@ class MesaApp(tk.Tk):
         self.recompute()
 
     def reset_to_reference(self):
-        preset = presets.reference_preset()
-        if preset is None:
-            messagebox.showinfo(
-                "Опорный набор",
-                "Опорный набор хранится в каталоге данных (переменная MESA_DATA_DIR в .env) "
-                "и сейчас не найден. Установлены нейтральные значения по умолчанию.")
-            preset = presets.default_preset()
-        self._apply_preset(preset)
+        """Опорный образец — модельная структура (методичка, п. 2.7) или набор
+        с "reference": true из каталога данных."""
+        self._apply_preset(presets.startup_preset())
         self.recompute()
 
     def new_sample(self):

@@ -85,15 +85,14 @@ def replace_params(s, **changes):
     return replace(s, **changes)
 
 
-def test_reference_iv_is_described_within_one_percent():
-    """ВАХ опорного образца — из его набора в каталоге данных (files.iv)."""
-    ref = presets.reference_preset()
-    files = [p for p in ref.resolved_files("iv") if p.is_file()] if ref else []
+def test_measured_iv_is_described_within_one_percent(validation_preset):
+    """ВАХ реального образца — из его набора в каталоге данных (files.iv)."""
+    files = [p for p in validation_preset.resolved_files("iv") if p.is_file()]
     if not files:
-        pytest.skip("ВАХ опорного образца недоступна: задайте MESA_DATA_DIR")
+        pytest.skip("ВАХ образца недоступна: задайте MESA_DATA_DIR")
     from mesa_diode.simulator.io import load_xy_file
     V, I = load_xy_file(files[0])
-    s = presets.to_structure({**ref.params, "mode": presets.MODE_BASIC})
+    s = presets.to_structure({**validation_preset.params, "mode": presets.MODE_BASIC})
     r = fitting.fit_iv(s, V, I, fitting.EMPIRICAL)
     assert fitting.TERM_LEAK in r.terms and r.error <= fitting.TARGET_ERROR
     strict = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, target=0.0)

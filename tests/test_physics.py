@@ -413,10 +413,11 @@ def test_default_preset_builds_structure_in_calc_units():
     assert presets.to_structure({"i_type": presets.I_TYPE_P}).scenario == ph.SCENARIO_A
 
 
-def test_startup_without_data_dir_is_neutral(monkeypatch):
+def test_startup_without_data_dir_is_model_structure(monkeypatch):
     monkeypatch.delenv("MESA_DATA_DIR", raising=False)
     assert presets.reference_preset() is None
     assert presets.startup_preset().params == presets.DEFAULT_PARAMS
+    assert presets.startup_preset().name == presets.MODEL_PRESET_NAME
 
 
 def test_auto_window_keeps_at_least_three_points_on_sparse_data():

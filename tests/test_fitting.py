@@ -11,8 +11,8 @@ from mesa_diode.simulator import physics as ph
 
 def _empirical(**changes):
     params = {**presets.DEFAULT_PARAMS, "mode": presets.MODE_BASIC, "D_um": 500.0,
-              "J0_emp": 1.5e-2, "n_emp": 1.3, "Rs": 130.0, "Rsh": 1.1e4, "I_L": 1.5e-5,
-              "m_leak": 2.3, "I_mod": 0.08, **changes}
+              "J0_emp": 2e-2, "n_emp": 1.4, "Rs": 150.0, "Rsh": 2e4, "I_L": 2e-5,
+              "m_leak": 2.5, "I_mod": 0.1, **changes}
     return presets.to_structure(params)
 
 
@@ -28,8 +28,8 @@ def _synthetic(s, noise=0.0, quantum=0.0):
 
 def test_series_resistance_modulation():
     s = _empirical()
-    assert ph.series_resistance(s, 0.0) == pytest.approx(130.0)
-    assert ph.series_resistance(s, 0.08) == pytest.approx(65.0)
+    assert ph.series_resistance(s, 0.0) == pytest.approx(150.0)
+    assert ph.series_resistance(s, 0.1) == pytest.approx(75.0)
     assert ph.series_resistance(presets.to_structure({"Rs": 50.0}), 1.0) == pytest.approx(50.0)
 
 
@@ -49,7 +49,7 @@ def test_empirical_fit_recovers_parameters_and_mechanisms():
     r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, target=0.0)      # только BIC
     assert set(r.terms) == {fitting.TERM_LEAK, fitting.TERM_MOD}
     assert r.error < 0.01
-    for key, true in (("n_emp", 1.3), ("Rs", 130.0), ("m_leak", 2.3), ("J0_emp", 1.5e-2)):
+    for key, true in (("n_emp", 1.4), ("Rs", 150.0), ("m_leak", 2.5), ("J0_emp", 2e-2)):
         assert r.params[key] == pytest.approx(true, rel=0.05), key
 
 
@@ -104,10 +104,10 @@ def test_locked_parameters_keep_entered_values():
     """Зафиксированные поля не меняются, остальное подбирается."""
     s = _empirical()
     V, I = _synthetic(s, noise=0.002, quantum=1e-7)
-    start = replace_params(s, Rs=130.0, n_emp=1.5, I_L=0.0, I_mod=float("inf"))
+    start = replace_params(s, Rs=150.0, n_emp=1.6, I_L=0.0, I_mod=float("inf"))
     r = fitting.fit_iv(start, V, I, fitting.EMPIRICAL, locked={"Rs", "tau_n_bg"}, target=0.0)
-    assert r.params["Rs"] == 130.0 and "Rs" in r.locked
-    assert r.params["n_emp"] == pytest.approx(1.3, rel=0.05)
+    assert r.params["Rs"] == 150.0 and "Rs" in r.locked
+    assert r.params["n_emp"] == pytest.approx(1.4, rel=0.05)
     assert any("Зафиксированы" in n for n in r.notes)
 
 
@@ -119,7 +119,7 @@ def test_locked_mechanism_switch():
     assert all(fitting.TERM_LEAK not in c.terms for c in off.candidates)
     on = fitting.fit_iv(s, V, I, fitting.EMPIRICAL, locked={"I_mod"})
     assert all(fitting.TERM_MOD in c.terms for c in on.candidates)
-    assert on.params["I_mod"] == 0.08
+    assert on.params["I_mod"] == 0.1
 
 
 def test_everything_locked_only_evaluates():

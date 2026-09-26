@@ -65,23 +65,33 @@ def minority_transport(s):
     return (Dp, Lp), (Dn, Ln)
 
 
+def transport_constants(s):
+    """Не зависящие от V величины (4.3), (4.3а): ((D_p, L_p, r_p), (D_n, L_n, r_n)),
+    r = S·L/D на дальней границе. Кэшируется в Structure.transport."""
+    (Dp, Lp), (Dn, Ln) = minority_transport(s)
+    p_n0, n_p0 = s.minority
+    r_p = boundary_velocity(s, s.n_side, p_n0, s.material.vth_p) * Lp / Dp
+    r_n = boundary_velocity(s, s.p_side, n_p0, s.material.vth_n) * Ln / Dn
+    return (Dp, Lp, r_p), (Dn, Ln, r_n)
+
+
 def boundary_velocity(s, side, minority0, vth):
     """Скорость отвода неосновных носителей S на дальней границе базы, см/с (4.3а).
 
-    «Сток» — идеальный, S = ∞ (как в эталонах ТЗ §9).
-    «Соседний слой» того же типа (изотипная граница i/n⁺, i/подложка):
-    квазиуровень Ферми неосновных непрерывен через границу — то же условие,
-    что (4.1) на краю ОПЗ [Зи, с. 92, ур. (28)], — поэтому Δn₂/n₂₀ = Δn₁/n₁₀,
-    и поток в соседний слой по (4.3) даёт S = (D₂/L₂)·(n₂₀/n₁₀)·f₂(w₂/L₂)
-    (вывод); f₂ — сток к контакту за соседним слоем. Сильнее легированный
-    сосед (n₂₀ ≪ n₁₀) почти «отражает», слабее — почти «сток». Последовательно
-    с тепловым ограничением (оценка): 1/S = 1/S₂ + 1/v_th. Без соседа — ∞."""
+    «Соседний слой»: S₂ = (D₂/L₂)·(n₂₀/n₁₀)·f₂(w₂/L₂), где f₂ — граничный
+    множитель соседа с его собственной дальней границей (контакт или следующий
+    слой — рекурсия по цепочке Side.neighbour); 1/S = 1/S₂ + 1/v_th. Остальные
+    условия — S = ∞ (идеальный «сток», как в эталонах ТЗ §9). Вывод и связь с
+    теорией Шокли — методичка, п. 6.4а."""
     if side.boundary == LAYER and side.neighbour is not None:
         nb = side.neighbour
         D2 = diffusion_coefficient(nb.mu_minority, s.T)
         L2 = diffusion_length(D2, minority_lifetime(nb, s.N_dis))
         minority2 = equilibrium_carriers(nb.N, s.ni)[1]
-        S = D2 / L2 * minority2 / minority0 * float(boundary_factor(nb.thickness / L2, SINK))
+        # у соседа своя дальняя граница: контакт («сток») или следующий слой (рекурсия)
+        r2 = boundary_velocity(s, nb, minority2, vth) * L2 / D2 if nb.boundary == LAYER else float("inf")
+        f2 = float(boundary_factor(nb.thickness / L2, nb.boundary, r2))
+        S = D2 / L2 * minority2 / minority0 * f2
         return 1.0 / (1.0 / max(S, 1e-300) + 1.0 / vth)
     return float("inf")
 
@@ -94,11 +104,9 @@ def saturation_current_density_parts(s, V):
     d²Δn/dx′² − Δn/L² = 0 [Зи, с. 94, ур. (39)]; [Ш49, с. 470, ур. (5.4)].
     J_s = qD_p·p_n0/L_p·f(w_n/L_p) + qD_n·n_p0/L_n·f(w_p/L_n) —
     [Зи, с. 94, ур. (44), (45)]; [Ш49, с. 460, ур. (4.13)]."""
-    (Dp, Lp), (Dn, Ln) = minority_transport(s)
+    (Dp, Lp, r_p), (Dn, Ln, r_n) = s.transport
     p_n0, n_p0 = s.minority
     wn, wp, _ = neutral_widths(s, V)
-    r_p = boundary_velocity(s, s.n_side, p_n0, s.material.vth_p) * Lp / Dp
-    r_n = boundary_velocity(s, s.p_side, n_p0, s.material.vth_n) * Ln / Dn
     holes = Q * Dp * p_n0 / Lp * boundary_factor(wn / Lp, s.n_side.boundary, r_p)
     electrons = Q * Dn * n_p0 / Ln * boundary_factor(wp / Ln, s.p_side.boundary, r_n)
     return holes, electrons

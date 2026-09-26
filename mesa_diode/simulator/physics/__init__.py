@@ -14,7 +14,7 @@
 | diffusion        | §4     | диффузионный ток, граничные условия базы, (4.3а)       |
 | scr              | §5     | ток генерации–рекомбинации в ОПЗ                       |
 | circuit          | §6     | эквивалентная схема, R_s(I), решатель (6.1)            |
-| resistance       | §6     | оценка R_s по геометрии и ρ(N) слоёв                   |
+| resistance       | §6     | оценка R_s по геометрии и ρ(N) слоёв (6.12)–(6.15)     |
 | checks           | —      | низкая инжекция, изоляция, рекомендации границ         |
 | ideality         | §6.3   | коэффициент идеальности из эксперимента                |
 | scenarios        | §6.6   | сравнение сценариев A и B                              |
@@ -36,6 +36,7 @@ from mesa_diode.simulator.physics.lifetimes import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.diffusion import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.scr import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.circuit import *  # noqa: F401,F403
+from mesa_diode.simulator.physics.resistance import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.checks import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.ideality import *  # noqa: F401,F403
 from mesa_diode.simulator.physics.scenarios import *  # noqa: F401,F403

@@ -5,6 +5,8 @@
 репозитория и выполняются tests/test_reference_sets.py через MESA_DATA_DIR.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -618,7 +620,8 @@ def test_iv_depends_on_weakly_doped_side():
     V = np.array([-1.0, 0.15])
 
     def current(**changes):
-        params = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "rho_sub": 40.0, **changes}
+        params = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_P, "rho_sub": 40.0, "N_As": 0.0, "Rsh": 1e12,
+                  **changes}
         return ph.solve_iv(presets.to_structure(params), V).I
 
     assert abs(current(N_i=2.9e14)[0]) > 5 * abs(current(N_i=2.9e17)[0])      # A: N_i важна
@@ -642,3 +645,44 @@ def test_mobility_doping_and_temperature():
     assert all(a > b for a, b in zip(rho, rho[1:]))
     assert ph.resistivity(1e16, 300.0) == pytest.approx(0.447, rel=0.02)
     assert ph.resistivity(1e16, 300.0, kind="n") < ph.resistivity(1e16, 300.0)
+
+
+# ------------------------------- 3.5: обогащённый слой подложки (N_As, d_s) --
+
+def test_surface_layer_structure_and_boundary_chain():
+    base = {"mode": presets.MODE_EXTENDED, "i_type": presets.I_TYPE_N, "N_i": 5e16, "rho_sub": 50.0,
+            "N_As": 1e18, "d_s_um": 0.5, "d_sub_um": 350.0}
+    b = presets.to_structure(base)
+    assert b.has_surface_layer and b.p_side.layer == "surf" and b.p_side.N == 1e18
+    assert b.p_side.boundary == ph.LAYER and b.p_side.neighbour.layer == "sub"
+    assert b.p_side.neighbour.thickness == pytest.approx((350.0 - 0.5) * UM)
+    no_layer = presets.to_structure({**base, "N_As": 0.0})
+    assert not no_layer.has_surface_layer and no_layer.p_side.layer == "sub"
+    assert b.Vbi > no_layer.Vbi                     # p-сторона легирована сильнее → V_bi больше
+    a = b.with_scenario(ph.SCENARIO_A)
+    assert a.p_side.neighbour.layer == "surf" and a.p_side.neighbour.neighbour.layer == "sub"
+    # сильно легированный слой под p-i-слоем почти отражает электроны → диффузия i-слоя меньше
+    j_with = ph.saturation_current_density_parts(a, 0.0)[1]
+    j_without = ph.saturation_current_density_parts(no_layer.with_scenario(ph.SCENARIO_A), 0.0)[1]
+    assert j_with < j_without
+
+
+def test_series_resistance_estimate_components():
+    s = presets.to_structure({"N_As": 1e18, "d_s_um": 0.5, "rho_sub": 50.0, "D_um": 500.0, "D_inner_um": 300.0})
+    est = ph.series_resistance_estimate(s)
+    assert est.total == pytest.approx(sum(est.parts.values()))
+    assert est.spread_length > 0
+    thin = ph.series_resistance_estimate(presets.to_structure({"N_As": 0.0, "rho_sub": 50.0}))
+    assert est.parts["подложка, растекание (6.15)"] < thin.parts["подложка, растекание (6.15)"]
+    # без слоя — растекание диска ρ/(4a) на толстой подложке
+    a = 250e-4
+    assert thin.parts["подложка, растекание (6.15)"] == pytest.approx(
+        min(thin.rho["sub"] / (4 * a), thin.rho["sub"] * 350e-4 / (math.pi * a * a)))
+
+
+def test_autofill_series_resistance_from_geometry():
+    values = {**presets.DEFAULT_PARAMS, "Rs": None}
+    filled = presets.autofill(values, ["Rs"])
+    expected = ph.series_resistance_estimate(presets.to_structure(presets.DEFAULT_PARAMS)).total
+    assert filled["Rs"][0] == pytest.approx(expected, rel=0.01)
+    assert "геометрии" in filled["Rs"][1]

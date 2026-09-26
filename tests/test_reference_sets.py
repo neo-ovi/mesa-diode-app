@@ -124,7 +124,9 @@ def test_reference_preset_reproduces_reference_values():
     for scenario, name in ((ph.SCENARIO_B, "Э0-B"), (ph.SCENARIO_A, "Э0-A")):
         if name not in cases:
             continue
-        s = replace(presets.to_structure(ref_preset.params, scenario), vbi_method=ph.VBI_BOLTZMANN)
+        # Эталоны §9 (ТЗ) считались без обогащённого слоя подложки (методичка, п. 2.6).
+        params = {**ref_preset.params, "N_As": 0.0, "d_s_um": 0.0}
+        s = replace(presets.to_structure(params, scenario), vbi_method=ph.VBI_BOLTZMANN)
         quantities = _quantities(s)
         for key, (expected, tol, *abs_tol) in cases[name]["expected"].items():
             value = float(quantities[key]())

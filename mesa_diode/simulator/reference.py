@@ -112,7 +112,27 @@ def reference_table(s, iv=None, n_exp=None, n_mod=None, metadata=None):
     g.add("n₀ / p₀", f"{n0:.3e} / {p0:.3e}", "см⁻³")
     rho_T = ph.resistivity(N_sub, s.T, s.material)
     g.add("ρ подложки при T (из N_{A})", rho_T, "Ом·см")
-    g.add("R_{sub} = ρ(T)·d_{sub}/A (верхняя оценка)", rho_T * s.d_sub / s.area, "Ом")
+    groups.append(g)
+
+    if s.has_surface_layer:
+        g = Group("Обогащённый слой подложки (п. 2.6)")
+        g.add("N_{As} / d_{s}", f"{s.N_As:.3e} / {s.d_s / UM:.4g}", "см⁻³ / мкм")
+        g.add("ρ слоя при T (2.8)", ph.resistivity(s.N_As, s.T, s.material), "Ом·см")
+        g.add("N_{As}/N_{A} подложки", s.N_As / N_sub, "—")
+        groups.append(g)
+        if s.scenario == ph.SCENARIO_B:
+            xp = float(ph.depletion_edges(s, -1.0)[1])
+            if xp > s.d_s:
+                warnings.append(f"ОПЗ при −1 В заходит в p-сторону на {xp / UM:.3g} мкм — глубже "
+                                f"обогащённого слоя (d_{{s}} = {s.d_s / UM:.3g} мкм): приближение "
+                                "однородного слоя грубое.")
+
+    est = ph.series_resistance_estimate(s)
+    g = Group("Оценка R_s по геометрии (6.12)–(6.15)")
+    for name, value in est.parts.items():
+        g.add(name, value, "Ом")
+    g.add("сумма — объёмная часть R_s", est.total, "Ом", "без контактов")
+    g.add("R_s в поле окна", s.Rs, "Ом")
     groups.append(g)
 
     g = Group(f"Переход (сценарий {s.scenario})")

@@ -5,8 +5,8 @@
 пути к файлам ВАХ/ВФХ и метаданные образца. Параметры реальных образцов
 в этом репозитории не хранятся: наборы лежат в каталоге данных
 (MESA_DATA_DIR/samples/<образец>/preset.json), опорный помечен
-"reference": true. Без каталога данных программа стартует с нейтральных
-значений DEFAULT_PARAMS.
+"reference": true. Без каталога данных программа стартует с модельной
+структуры DEFAULT_PARAMS (не образец; методичка, п. 2.7).
 """
 
 import json
@@ -40,13 +40,15 @@ class ParamSpec:
 # Порядок совпадает с таблицей §5.3.
 NUMERIC_PARAMS = [
     ParamSpec("D_um", "диаметр мезы D", "мкм", "D", UM),
-    ParamSpec("D_inner_um", "внутренний диаметр кольца (только схема)", "мкм", None),
+    ParamSpec("D_inner_um", "внутренний диаметр кольца (окно контакта)", "мкм", "D_inner", UM),
     ParamSpec("d_epi_um", "толщина эпитаксии d_epi", "мкм", "d_epi", UM),
     ParamSpec("h_um", "высота мезы h", "мкм", "h", UM),
     ParamSpec("d_n_um", "толщина n⁺-слоя d_n", "мкм", "d_n", UM),
     ParamSpec("ND_plus", "концентрация n⁺ N_D⁺", "см⁻³", "ND_plus"),
     ParamSpec("N_i", "концентрация i-слоя N_i", "см⁻³", "N_i"),
     ParamSpec("rho_sub", "удельное сопротивление подложки ρ_sub", "Ом·см", "rho_sub"),
+    ParamSpec("N_As", "концентрация Ga у поверхности подложки N_As", "см⁻³", "N_As"),
+    ParamSpec("d_s_um", "толщина обогащённого слоя подложки d_s", "мкм", "d_s", UM),
     ParamSpec("d_sub_um", "толщина подложки d_sub", "мкм", "d_sub", UM),
     ParamSpec("T", "температура T", "К", "T"),
     ParamSpec("T_rho", "температура измерения ρ_sub", "К", "T_rho"),
@@ -84,9 +86,9 @@ NUMERIC_PARAMS = [
     ParamSpec("growth_T", "температура подложки при росте", "°C", None),
 ]
 # Ключи, которые только хранятся в наборе (в physics.Structure не входят).
-# D_inner_um в расчёт тоже не входит, но нужен для схемы мезы — он обычный параметр.
+# D_inner_um — окно кольцевого контакта: схема мезы и оценка R_s (6.12).
 STORED_KEYS = frozenset(spec.key for spec in NUMERIC_PARAMS
-                        if spec.field is None and spec.key != "D_inner_um")
+                        if spec.field is None)
 CHOICE_FIELDS = ("bc_A_n", "bc_A_p", "bc_B_n", "bc_B_p")
 FLAG_FIELDS = ("sns_refinement", "edge_area")
 
@@ -115,9 +117,9 @@ MODEL_KEYS = models.model_fields()           # поля, нужные тольк
 CIRCUIT_KEYS = frozenset({"Rs", "I_mod", "Rsh", "I_L", "m_leak"})
 # ρ подложки — в базовом режиме: в сценарии B подложка — p-сторона перехода,
 # и по ρ_sub (2.8) считаются V_bi, ширина ОПЗ и ВФХ.
-BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "T_rho", "T"})
+BASIC_KEYS = (frozenset({"D_um", "D_inner_um", "h_um", "ND_plus", "N_i", "rho_sub", "N_As", "T_rho", "T"})
               | CIRCUIT_KEYS | MODEL_KEYS)
-MEASURED_KEYS = (BASIC_KEYS - MODEL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um",
+MEASURED_KEYS = (BASIC_KEYS - MODEL_KEYS) | {"d_epi_um", "d_n_um", "d_sub_um", "d_s_um",
                                                  "N_dis"} | STORED_KEYS
 FIT_ONLY_KEYS = frozenset({"mu_n", "mu_p_i", "mu_p_nplus", "sigma_R_epi", "sigma_R_sub",
                            "tau_n_bg", "tau_p_bg", "tau0_bg", "n2"})
@@ -141,19 +143,22 @@ def current_model(params):
         return params.get("basic_model") or ph.MODEL_EMPIRICAL
     return MODE_MODEL.get(mode, ph.MODEL_PHYSICAL)
 
-# Нейтральные значения по умолчанию (не параметры какого-либо образца).
+# Значения по умолчанию — модельная опорная структура (не параметры какого-либо образца).
 DEFAULT_PARAMS = {
     "substrate": "Ge",
     "i_type": I_TYPE_N,
+    # Модельная опорная структура (не образец): методичка, п. 2.7.
     "D_um": 500.0,
     "D_inner_um": 300.0,
-    "d_epi_um": 3.2,
-    "h_um": 3.2,
+    "d_epi_um": 2.5,
+    "h_um": 3.0,
     "d_n_um": 0.4,
-    "ND_plus": 5e17,
-    "N_i": 5e15,
-    "rho_sub": 5.0,
-    "d_sub_um": 300.0,
+    "ND_plus": 5e18,
+    "N_i": 5e16,
+    "rho_sub": 50.0,
+    "N_As": 1e18,
+    "d_s_um": 0.5,
+    "d_sub_um": 350.0,
     "T": 300.0,
     "T_rho": 300.0,
     "mu_n": GE.mu_n_max,
@@ -166,9 +171,9 @@ DEFAULT_PARAMS = {
     "sigma_R_epi": 3.5e-3,
     "sigma_R_sub": 5.5e-4,
     "n2": 2.0,
-    "Rs": 10.0,
+    "Rs": 200.0,
     "I_mod": float("inf"),
-    "Rsh": 1e6,
+    "Rsh": 5e4,
     "I_L": 0.0,
     "m_leak": 3.0,
     "n_emp": 1.5,
@@ -201,6 +206,7 @@ DEFAULT_PARAMS = {
 AUTO_DEFAULT = "значение по умолчанию"
 AUTO_FROM_IV = "из ВАХ (n_эксп, подгонка (6.3))"
 AUTO_FROM_DOSE = "оценка Q/d_n по дозе имплантации (полная активация)"
+AUTO_FROM_GEOMETRY = "объёмная оценка по геометрии и ρ(N) слоёв (6.12)–(6.15), без контактов"
 
 
 def autofill(values, keys, ideality=None):
@@ -208,7 +214,8 @@ def autofill(values, keys, ideality=None):
 
     n и J₀ — из n_эксп и I₀/A по загруженной ВАХ (ideality —
     physics.IdealityResult или None); N_D⁺ — оценка Q/d_n, если доза и d_n
-    заданы пользователем; остальное — DEFAULT_PARAMS. Поля, которые только
+    заданы пользователем; R_s — объёмная оценка по геометрии и ρ(N) слоёв
+    (6.12)–(6.15); остальное — DEFAULT_PARAMS. Поля, которые только
     хранятся в наборе (STORED_KEYS), не заполняются: пустое — «не измерено».
     Возвращает {ключ: (значение, источник)}."""
     empty = [key for key in keys if values.get(key) is None and key not in STORED_KEYS]
@@ -222,8 +229,15 @@ def autofill(values, keys, ideality=None):
             filled[key] = (float(f"{ideality.I0 / area:.3g}"), AUTO_FROM_IV)
         elif key == "ND_plus" and values.get("implant_dose") and values.get("d_n_um"):
             filled[key] = (float(f"{values['implant_dose'] / (values['d_n_um'] * UM):.3g}"), AUTO_FROM_DOSE)
-        else:
+        elif key != "Rs":
             filled[key] = (DEFAULT_PARAMS[key], AUTO_DEFAULT)
+    if "Rs" in empty:        # после остальных: оценке нужны заполненные концентрации и толщины
+        merged = {**values, **{k: v for k, (v, _src) in filled.items()}, "Rs": DEFAULT_PARAMS["Rs"]}
+        try:
+            estimate = ph.series_resistance_estimate(to_structure(merged)).total
+            filled["Rs"] = (float(f"{estimate:.3g}"), AUTO_FROM_GEOMETRY)
+        except (ValueError, ZeroDivisionError):
+            filled["Rs"] = (DEFAULT_PARAMS["Rs"], AUTO_DEFAULT)
     return filled
 
 

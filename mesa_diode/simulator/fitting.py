@@ -65,11 +65,17 @@ CORE = {key: core(key) for key in models.MODELS}
 PARAMS = {k: (p.field, p.log, p.lo, p.hi) for k, p in _ALL.items()}
 UNITS = {k: p.unit for k, p in _ALL.items()}
 LABELS = {k: p.label for k, p in _ALL.items()}
+SCALES = {k: p.scale for k, p in _ALL.items()}     # значение в окне = значение в Structure / scale
 
 # Поле окна (presets) → параметр подгонки; τ_n^bg и τ_p^bg подбираются общим
 # множителем tau_bg, поэтому фиксируются вместе.
-FIELD_TO_PARAM = {**{p.field: k for k, p in _ALL.items() if p.field},
+FIELD_TO_PARAM = {**{(p.key or p.field): k for k, p in _ALL.items() if p.field},
                   "tau_n_bg": "tau_bg", "tau_p_bg": "tau_bg"}
+
+
+def display_value(key, value):
+    """Значение параметра подгонки в единицах окна (d_s — мкм, остальные как в Structure)."""
+    return value / SCALES.get(key, 1.0) if value == value else value
 
 
 def fittable_fields(model):
@@ -117,10 +123,12 @@ class FitResult:
 
     def structure_values(self):
         """Значения для полей окна (ключи presets): τ_bg → τ_n^bg и τ_p^bg."""
-        values = dict(self.params)
-        if "tau_bg" in values:
-            tau = values.pop("tau_bg")
-            values["tau_n_bg"] = values["tau_p_bg"] = tau
+        values = {}
+        for key, value in self.params.items():
+            if key == "tau_bg":
+                values["tau_n_bg"] = values["tau_p_bg"] = value
+            else:
+                values[_ALL[key].key or key] = display_value(key, value)
         return values
 
 
@@ -171,7 +179,7 @@ def apply(s, values):
             changes["tau_n_bg"] = changes["tau_p_bg"] = value
         else:
             changes[name] = value
-    return replace(s, **changes)
+    return s.updated(**changes)
 
 
 def model_current(s, V, values):
@@ -335,7 +343,9 @@ def fit_iv(s, V, I, model=EMPIRICAL, progress=None, locked=(), target=TARGET_ERR
     for terms in _variants(base, lock):
         if progress:
             progress("подгонка: " + (", ".join(TERMS[t][0] for t in terms) or "минимальная модель"))
-        used = list(core(model)) + [p for t in terms for p in TERMS[t][1]]
+        # d_s подбирается, только если обогащённый слой задан (N_As > 0)
+        used = [k for k in core(model) if k != "d_s" or base.has_surface_layer]
+        used += [p for t in terms for p in TERMS[t][1]]
         keys = [k for k in used if k not in lock]
         fixed = {k: v for k, v in off.items() if k not in used}
         s_run = apply(base, fixed)
@@ -466,14 +476,18 @@ def _consistency_notes(result, s):
     Rs = p.get("Rs")
     if Rs is not None and np.isfinite(Rs):
         try:
-            rho_T = ph.resistivity(s.substrate[0], s.T, s.material)
-            r_sub = rho_T * s.d_sub / s.area
+            geo = ph.series_resistance_estimate(s).total
         except (ValueError, ZeroDivisionError):
-            r_sub = float("nan")
-        if np.isfinite(r_sub) and Rs > 10 * r_sub and r_sub > 0:
-            notes.append(f"R_s = {Rs:.3g} Ом больше оценки сопротивления подложки ρ·d/A = {r_sub:.3g} Ом в "
-                         f"{Rs / r_sub:.0f} раз: основное сопротивление — контакты или растекание под "
-                         "кольцевым контактом [Кур74, с. 238].")
+            geo = float("nan")
+        if np.isfinite(geo) and geo > 0:
+            if Rs < 0.5 * geo:
+                notes.append(f"R_s = {Rs:.3g} Ом меньше объёмной оценки по геометрии {geo:.3g} Ом (6.12)–(6.15): "
+                             "ток растекается шире, чем в оценке (проверьте N_As и d_s обогащённого слоя), "
+                             "или ρ и толщины слоёв заданы неверно (методичка, п. 9.5).")
+            elif Rs > 10 * geo:
+                notes.append(f"R_s = {Rs:.3g} Ом больше объёмной оценки по геометрии {geo:.3g} Ом в "
+                             f"{Rs / geo:.0f} раз: основное сопротивление — контакты [Кур74, с. 238] "
+                             "(методичка, п. 9.5).")
     if result.model == PHYSICAL and "tau0_bg" in p and "tau_bg" in p:
         if p["tau0_bg"] > 10 * p["tau_bg"]:
             notes.append(f"τ₀^bg = {p['tau0_bg']:.3g} с больше τ^bg = {p['tau_bg']:.3g} с в "

@@ -44,6 +44,8 @@ class FitParam:
     hi: float
     unit: str
     label: str
+    key: str = ""          # поле окна (presets), если отличается от поля Structure
+    scale: float = 1.0     # значение в окне = значение в Structure / scale
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ FIT_PARAMS = {
     "J02_2d": FitParam("J02_2d", True, 1e-15, 1e3, "А/см²", "J₀₂ (n = 2)"),
     "tau0_bg": FitParam("tau0_bg", True, 1e-13, 1e-2, "с", "τ₀^bg"),
     "tau_bg": FitParam(None, True, 1e-12, 1e-1, "с", "τ_n^bg = τ_p^bg"),   # τ_n^bg = τ_p^bg
+    "d_s": FitParam("d_s", True, 1e-6, 1e-2, "мкм", "d_s (обогащённый слой)", key="d_s_um", scale=1e-4),
 }
 
 
@@ -153,8 +156,9 @@ def _physical_parts(s, Vd):
 register(CurrentModel(
     key=ph.MODEL_PHYSICAL, label="физическая (§4–§6)", formula="(4.4) + (5.4)",
     summary="Диффузия (4.4) и ток ОПЗ (5.4) по геометрии, легированию и временам жизни.",
-    fields=frozenset(), fit_core=("tau0_bg", "tau_bg"),
+    fields=frozenset(), fit_core=("tau0_bg", "tau_bg", "d_s"),
     components=("diff", "gr"), parts=_physical_parts,
     saturation=lambda s: (float(ph.saturation_current_density(s, 0.0)), "J_s(0)"),
-    start=lambda s, V, I: {"tau0_bg": s.tau0_bg, "tau_bg": float(np.sqrt(s.tau_n_bg * s.tau_p_bg))},
+    start=lambda s, V, I: {"tau0_bg": s.tau0_bg, "tau_bg": float(np.sqrt(s.tau_n_bg * s.tau_p_bg)),
+                           "d_s": s.d_s if s.d_s > 0 else 0.5e-4},
     ref="гл. 4–7"))

@@ -14,7 +14,7 @@ from mesa_diode.simulator.physics.carriers import (
     reduced_fermi_level, thermal_voltage,
 )
 from mesa_diode.simulator.physics.constants import (
-    MODEL_PHYSICAL, REFLECT, SCENARIO_A, SCENARIO_B, SINK, VBI_DEGENERATE,
+    LAYER, MODEL_PHYSICAL, REFLECT, SCENARIO_A, SCENARIO_B, SINK, VBI_DEGENERATE,
 )
 from mesa_diode.simulator.physics.electrostatics import built_in_potential
 
@@ -24,7 +24,7 @@ class Side:
     """Нейтральная область одной стороны перехода."""
 
     kind: str            # "n" или "p"
-    layer: str           # "n+", "i" или "sub"
+    layer: str           # "n+", "i", "surf" (обогащённый слой подложки) или "sub"
     N: float             # концентрация ионизованной примеси, см⁻³
     thickness: float     # толщина слоя, см
     mu_minority: float   # подвижность неосновных носителей, см²/(В·с)
@@ -38,10 +38,13 @@ class Side:
 class Structure:
     """Параметры структуры (§5.3) в единицах расчёта: см, см⁻³, с, Ом, А, К.
 
+    Слои сверху вниз: n⁺ (d_n, N_D⁺) / i (d_i, N_i) / обогащённый галлием слой
+    подложки (d_s, N_As; нет, если d_s = 0 или N_As = 0) / подложка (N_A по ρ_sub).
     Сценарий A: i-слой p-типа, переход n⁺/i (z_j = d_n).
-    Сценарий B: i-слой n-типа, переход i/подложка (z_j = d_epi).
-    Граничные условия дальних границ: bc_A_n (верхний контакт),
-    bc_A_p (граница i/подложка), bc_B_n (граница n/n⁺), bc_B_p (тыльный контакт).
+    Сценарий B: i-слой n-типа, переход i/подложка (z_j = d_epi); p-сторона —
+    обогащённый слой, если он есть. Граничные условия дальних границ: bc_A_n
+    (верхний контакт), bc_A_p (граница i/подложка), bc_B_n (граница n/n⁺),
+    bc_B_p (тыльный контакт). Методичка, гл. 2, п. 2.6.
     """
 
     D: float
@@ -54,6 +57,9 @@ class Structure:
     rho_sub: float
     T: float = 300.0
     T_rho: float = 300.0             # температура, при которой измерено ρ_sub, К
+    D_inner: float = 0.0             # окно кольцевого контакта (внутренний диаметр), см
+    N_As: float = 0.0                # Ga у поверхности подложки (обогащённый слой), см⁻³
+    d_s: float = 0.0                 # толщина обогащённого слоя подложки, см
     scenario: str = SCENARIO_B
     mu_n: float = GE.mu_n_max        # электроны — неосновные в p-области
     mu_p_i: float = GE.mu_p_max      # дырки в i-слое
@@ -87,6 +93,16 @@ class Structure:
     def with_scenario(self, scenario):
         return replace(self, scenario=scenario)
 
+    def updated(self, **changes):
+        """replace(self, **changes), сохраняющий кэш материала и электростатики,
+        если меняются только поля, от которых он не зависит (времена жизни, схема,
+        эмпирические параметры, d_s): подгонка вызывает это на каждом шаге."""
+        new = replace(self, **changes)
+        if set(changes) <= _NON_ELECTROSTATIC and new.has_surface_layer == self.has_surface_layer:
+            for name in _ELECTROSTATIC_CACHE:
+                new.__dict__[name] = getattr(self, name)     # считается один раз на self
+        return new
+
     # --- материал при температуре T ---
     @cached_property
     def Vt(self):
@@ -117,6 +133,22 @@ class Structure:
         (N_A, [предупреждения]). N_A от температуры не зависит (полная ионизация)."""
         return acceptor_from_resistivity(self.rho_sub, self.T_rho, self.material)
 
+    @cached_property
+    def has_surface_layer(self):
+        """Есть ли обогащённый галлием слой у поверхности подложки (п. 2.6)."""
+        return self.N_As > 0 and self.d_s > 0
+
+    def _substrate_stack(self, back_boundary):
+        """Нижние слои p-типа: обогащённый слой (если есть) → подложка → тыльный контакт.
+        Возвращает верхний из них (Side) с цепочкой соседей."""
+        bulk_thickness = max(self.d_sub - (self.d_s if self.has_surface_layer else 0.0), 1e-7)
+        sub = Side("p", "sub", self.substrate[0], bulk_thickness, self.mu_n,
+                   self.tau_n_bg, self.sigma_R_sub, back_boundary)
+        if not self.has_surface_layer:
+            return sub
+        return Side("p", "surf", self.N_As, self.d_s, self.mu_n,
+                    self.tau_n_bg, self.sigma_R_sub, LAYER, sub)
+
     # --- стороны перехода по сценарию (§5.2) ---
     @cached_property
     def n_side(self):
@@ -131,12 +163,10 @@ class Structure:
     @cached_property
     def p_side(self):
         if self.scenario == SCENARIO_A:
-            sub = Side("p", "sub", self.substrate[0], self.d_sub, self.mu_n,
-                       self.tau_n_bg, self.sigma_R_sub, SINK)        # за ней тыльный контакт
+            below = self._substrate_stack(SINK)                         # за ним тыльный контакт
             return Side("p", "i", self.N_i, self.d_i, self.mu_n,
-                        self.tau_n_bg, self.sigma_R_epi, self.bc_A_p, sub)
-        return Side("p", "sub", self.substrate[0], self.d_sub, self.mu_n,
-                    self.tau_n_bg, self.sigma_R_sub, self.bc_B_p)
+                        self.tau_n_bg, self.sigma_R_epi, self.bc_A_p, below)
+        return self._substrate_stack(self.bc_B_p)
 
     @cached_property
     def z_j(self):
@@ -167,7 +197,22 @@ class Structure:
         return built_in_potential(self, self.vbi_method)
 
     @cached_property
+    def transport(self):
+        """Параметры диффузии, не зависящие от V (кэш для решателя): diffusion.transport_constants."""
+        from mesa_diode.simulator.physics.diffusion import transport_constants
+        return transport_constants(self)
+
+    @cached_property
     def N_eff(self):
         """N_eff = N_A·N_D/(N_A + N_D), см⁻³ (3.5)."""
         NA, ND = self.p_side.N, self.n_side.N
         return NA * ND / (NA + ND)
+
+
+# Structure.updated: свойства, зависящие только от легирования, T, геометрии и
+# сценария, и поля, которые их не меняют.
+_ELECTROSTATIC_CACHE = ("Vt", "ni", "eps", "area", "d_i", "substrate", "z_j",
+                        "majority", "minority", "eta", "Vbi", "N_eff")
+_NON_ELECTROSTATIC = frozenset({
+    "tau_n_bg", "tau_p_bg", "tau0_bg", "d_s", "Rs", "I_mod", "Rsh", "I_L", "m_leak",
+    "J0_emp", "n_emp", "J01_2d", "J02_2d"})

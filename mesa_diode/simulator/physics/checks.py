@@ -56,9 +56,15 @@ def _recommend(N_layer, N_neighbour):
 def boundary_recommendations(s):
     """(6.2) Рекомендации для дальних границ n- и p-стороны текущего сценария.
     Возвращает {"n": (граница, рекомендация), "p": (...)}; None — металл."""
+    below = s.N_As if s.has_surface_layer else s.substrate[0]
     if s.scenario == SCENARIO_A:
+        name = "граница i/обогащённый слой" if s.has_surface_layer else "граница i/подложка"
         return {"n": ("верхний контакт", _recommend(s.ND_plus, None)),
-                "p": ("граница i/подложка", _recommend(s.N_i, s.substrate[0]))}
+                "p": (name, _recommend(s.N_i, below))}
+    if s.has_surface_layer:
+        return {"n": ("граница n/n⁺", _recommend(s.N_i, s.ND_plus)),
+                "p": ("обогащённый слой/подложка — всегда «соседний слой»",
+                      _recommend(s.N_As, s.substrate[0]))}
     return {"n": ("граница n/n⁺", _recommend(s.N_i, s.ND_plus)),
             "p": ("тыльный контакт", _recommend(s.substrate[0], None))}
 

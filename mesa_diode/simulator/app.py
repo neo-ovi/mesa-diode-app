@@ -65,7 +65,8 @@ SIDEBAR_WIDTH = 400
 SHORT_LABELS = {
     "D_um": "D (мезы)", "D_inner_um": "d кольца (схема)", "d_epi_um": "d_epi",
     "h_um": "h (травление)", "d_n_um": "d_n (n⁺)", "d_sub_um": "d_sub",
-    "ND_plus": "N_D⁺", "N_i": "N_i", "rho_sub": "ρ_sub", "T_rho": "T изм. ρ", "T": "T",
+    "ND_plus": "N_D⁺", "N_i": "N_i", "rho_sub": "ρ_sub", "N_As": "N_As (Ga у пов.)",
+    "d_s_um": "d_s (обогащ.)", "T_rho": "T изм. ρ", "T": "T",
     "mu_n": "μ_n (электроны)", "mu_p_i": "μ_p (i-слой)", "mu_p_nplus": "μ_p (n⁺)",
     "tau_n_bg": "τ_n^bg", "tau_p_bg": "τ_p^bg", "tau0_bg": "τ₀^bg (ОПЗ)",
     "N_dis": "N_dis", "sigma_R_epi": "σ_R (i, n⁺)", "sigma_R_sub": "σ_R (подложка)",
@@ -94,7 +95,7 @@ CURVES_BY_MODEL = {
 POSITIVE_KEYS = ("D_um", "d_epi_um", "h_um", "d_n_um", "d_sub_um", "ND_plus", "N_i",
                  "rho_sub", "T", "T_rho", "mu_n", "mu_p_i", "mu_p_nplus", "tau_n_bg", "tau_p_bg",
                  "tau0_bg", "n2", "Rsh", "m_leak", "D_inner_um", "n_emp", "J0_emp")
-NONNEGATIVE_KEYS = ("N_dis", "sigma_R_epi", "sigma_R_sub", "Rs", "I_L",
+NONNEGATIVE_KEYS = ("N_dis", "sigma_R_epi", "sigma_R_sub", "Rs", "I_L", "N_As", "d_s_um",
                     "afm_rms_nm", "afm_defects", "xrd_fwhm", "xrd_instrument", "xrd_intrinsic",
                     "hall_mu", "implant_dose",
                     "implant_energy")
@@ -1019,7 +1020,8 @@ class MesaApp(tk.Tk):
 
     def _show_fit_result(self, result):
         self.fit_table.delete(*self.fit_table.get_children())
-        for key, value in result.params.items():
+        for key, raw in result.params.items():
+            value = fitting.display_value(key, raw)
             log_scale = fitting.PARAMS[key][1]
             sigma = result.stderr.get(key, float("nan"))
             if key in result.locked:
@@ -1500,6 +1502,7 @@ class MesaApp(tk.Tk):
             "D_um": value("D_um"), "d_um": value("D_inner_um"), "h_um": value("h_um"),
             "ND_plus": value("ND_plus"), "N_i": value("N_i"), "N_sub": s.substrate[0],
             "T": value("T"), "i_type": {"n": "i-слой n", "p": "i-слой p", "both": "тип i: оба"}[params["i_type"]],
+            "surface_layer": s.has_surface_layer, "d_s_um": value("d_s_um"),
         })
         draw_mesa_diagram(self.ax_mesa, diagram_params)
         self.mesa_canvas.draw_idle()

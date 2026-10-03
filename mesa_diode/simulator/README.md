@@ -11,18 +11,58 @@
 Из корня репозитория, после обычной установки (см. README.md репозитория):
 
 ```bash
-python scripts/run_simulator.py
+python scripts/run_simulator.py           # ключи: --check — проверка окружения, --version
 ```
 
 На Linux, если увидите `ModuleNotFoundError: No module named 'tkinter'`,
 доустановите системный пакет (в venv не ставится через pip):
 
 ```bash
-sudo apt install python3-tk        # Debian/Ubuntu
-sudo dnf install python3-tkinter   # Fedora
+sudo apt install python3-tk python3-venv   # Linux Mint, Ubuntu, Debian
+sudo dnf install python3-tkinter           # Fedora
 ```
 
 На Windows и macOS Tkinter уже входит в стандартную поставку Python.
+
+## Linux без установки (без Python и git)
+
+Для Linux программа собирается так, что внутри уже есть Python, библиотеки
+и Tk: её можно скачать или принести на флешке и запустить двойным щелчком —
+устанавливать ничего не нужно. Два варианта:
+
+- **папка** `MesaSimulator/` (исполняемый файл и `_internal`) в архиве
+  `MesaSimulator-linux-x86_64.tar.xz`, около 40 МБ — рекомендуется: архив
+  меньше, запуск быстрее, признак «исполняемый» сохраняется;
+- **один файл** `MesaSimulator`, около 60 МБ — при каждом запуске
+  распаковывается во временную папку.
+
+Работает в Linux Mint 21.x и 22.x, LMDE 6 и 7, Ubuntu 22.04 и новее,
+Debian 12 и новее (x86-64). На Mint 20 и старше — нет: там glibc старше 2.35.
+
+Готовая сборка ветки `CV-VI-Linux` — на странице [linux-build](https://github.com/neo-ovi/mesa-diode-app/releases/tag/linux-build):
+GitHub собирает её сам после каждого пуша в ветку
+(`.github/workflows/linux-build.yml`), скачивается без входа в GitHub.
+
+Сборка вручную (нужен Docker; результат — `dist/MesaSimulator` и
+`dist/MesaSimulator-linux-x86_64.tar.xz` с инструкцией
+[`packaging/README-Linux.txt`](../../packaging/README-Linux.txt)):
+
+```bash
+bash packaging/build_linux.sh
+```
+
+Скрипт собирает в контейнере Ubuntu 22.04: программа, собранная на старой
+glibc, работает на новых системах, а собранная на новой — на старых нет.
+Без Docker то же самое делается на самой Ubuntu 22.04 или Linux Mint 21:
+`sudo apt install python3-venv python3-dev python3-tk binutils`, затем venv,
+`pip install -r requirements-build.txt` и `pyinstaller packaging/mesa_simulator.spec`
+(с `MESA_ONEDIR=1` — вариант «папка»).
+
+Особенности окна в Linux (шрифты, масштаб HiDPI, тема, Ctrl+C/V на русской
+раскладке, диалог файлов) учтены в `desktop.py`; меню «Настройки» — папка с
+данными, масштаб интерфейса, пункт в меню приложений. Если что-то не так —
+`./MesaSimulator --check` (проверка без окна) и журнал
+`~/.mesa_diode/errors.log`. Подробно — методичка, п. 1А.22.
 
 ## Сборка в отдельный .exe (Windows)
 
@@ -91,6 +131,13 @@ pyinstaller --onefile --windowed --name MesaSimulator scripts\run_simulator.py
 запуске, отключается переменной `MESA_NO_TUTORIAL=1`): 12 шагов первого
 моделирования в базовом режиме на модельном образце с примером ВАХ —
 `simulator/tutorial.py`.
+
+**Настройки** (меню «Настройки», ветка CV-VI-Linux): «Папка с данными» — где
+наборы образцов (`samples`) и методичка (`docs`): копия приватного
+репозитория, скачанная архивом или перенесённая на флешке, без git и `.env`
+(переменная MESA_DATA_DIR, если задана, главнее); «Масштаб интерфейса» —
+«Авто» (как в системе) или 100–200 %, со следующего запуска; в Linux —
+«Добавить в меню приложений». Настройки хранятся в `~/.mesa_diode/`.
 
 Значения при переключении режима сохраняются. «Наборы → Новый образец
 (пустые поля)» — начать с пустыми полями. Значение поля меняется колесом

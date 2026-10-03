@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from mesa_diode.simulator import hints, presets, scheme, tutorial
+from mesa_diode.simulator import hints, presets, scheme, tutorial, typeset
 from mesa_diode.simulator import physics as ph
 
 
@@ -46,19 +46,72 @@ def test_hand_calculation_matches_solver():
     lines = scheme.formula_lines(s, presets.MODE_BASIC)
     I = float(ph.junction_current(s, scheme.SAMPLE_VD))
     V = scheme.SAMPLE_VD + I * s.Rs
-    assert any(f"I = {I:.3g} А" in line and f"{V:.4g} В" in line for line in lines)
+    assert any(line.strip().startswith("I = ") and f"{I:.3g} А" in line for line in lines)
+    assert any(line.strip().startswith("V = ") and f"{V:.4g} В" in line for line in lines)
     # и совпадает с решателем, решающим V → I
     assert float(ph.solve_iv(s, np.array([V])).I[0]) == pytest.approx(I, rel=1e-6)
-    assert "V = V_д + I·R_s" in "\n".join(lines) and "I_L" not in lines[1]
+    circuit = [b for b in scheme.panel_blocks(s, presets.MODE_BASIC)
+               if isinstance(b, scheme.Eq) and "(6.1)" in b.number]
+    assert len(circuit) == 1 and "V = V_д + I·R_s" in circuit[0].text and "I_L" not in circuit[0].text
     assert any("C(0)" in line for line in lines)
 
 
+def _panels():
+    for mode, model in ((presets.MODE_BASIC, None), (presets.MODE_EXTENDED, ph.MODEL_EMPIRICAL),
+                        (presets.MODE_EXTENDED, ph.MODEL_TWO_DIODE), (presets.MODE_EXTENDED, ph.MODEL_PHYSICAL),
+                        (presets.MODE_FIT, None)):
+        changes = {"extended_model": model} if model else {}
+        s = _structure(mode, I_L=1e-6, I_mod=0.05, **changes)
+        yield mode, s, scheme.panel_blocks(s, mode)
+
+
 def test_panel_lines_for_every_model():
-    for mode, model in ((presets.MODE_EXTENDED, ph.MODEL_TWO_DIODE), (presets.MODE_FIT, ph.MODEL_PHYSICAL)):
-        s = _structure(mode, extended_model=model)
+    for mode, s, _blocks in _panels():
         text = "\n".join(scheme.formula_lines(s, mode))
-        assert "Точка вручную" in text and "ВФХ" in text
+        assert "Расчёт точки вручную" in text and "ВФХ" in text
         assert scheme.model_summary(s, mode)
+
+
+def test_panel_formulas_are_typeset_like_a_textbook():
+    """Каждая формула панели набирается mathtext, у неё есть номер, сноска с источником и
+    пунктом методички; символы поясняются под формулой по одному разу; кириллица в формулах —
+    только в \\mathrm{…}."""
+    for mode, _s, blocks in _panels():
+        seen = set()
+        for block in blocks:
+            if isinstance(block, scheme.Eq):
+                assert block.number.startswith("(") and "[" in block.note and "Методичка" in block.note
+                for tex in block.tex:
+                    typeset.raster(tex, typeset.DISPLAY_PT, 96)
+                    assert not typeset.cyrillic_outside_mathrm(tex), tex
+                for symbol, description in block.where:
+                    typeset.raster(symbol, typeset.SYMBOL_PT, 96)
+                    assert symbol not in seen and description
+                    seen.add(symbol)
+            elif isinstance(block, scheme.Step):
+                for tex in (block.tex, block.result):
+                    if tex:
+                        typeset.raster(tex, typeset.CALC_PT, 96)
+                        assert not typeset.cyrillic_outside_mathrm(tex), tex
+        assert {"$A$", r"$V_{\mathrm{д}}$", r"$R_{\mathrm{s}}$", r"$R_{\mathrm{sh}}$"} <= seen
+
+
+def test_scheme_labels_are_formulas():
+    for mode, s, _blocks in _panels():
+        branches, series = scheme.elements(s, mode)
+        for element in branches + [series]:
+            assert element.tex and all(t.startswith("$") for t in element.tex)
+            for tex in element.tex:
+                typeset.raster(tex, 11, 96)
+
+
+def test_tex_numbers():
+    assert scheme.tex_num(0.2) == "0.2" and scheme.tex_num(25.85, 4) == "25.85"
+    assert scheme.tex_num(3.41e-8) == r"3.41\cdot10^{-8}"
+    assert scheme.tex_num(1e-6) == r"1\cdot10^{-6}"           # множитель 1 не теряется в произведении
+    assert scheme.tex_num(9.996e-5) == r"1\cdot10^{-4}"        # округление 9.996 → 10
+    assert scheme.tex_num(float("inf")) == r"\infty" and scheme.tex_num(0.0) == "0"
+    assert scheme.markup_num(1.92e13) == "1.92·10^{13}"
 
 
 def test_tutorial_steps_and_example():

@@ -3,7 +3,17 @@ import json
 
 import pytest
 
-from mesa_diode.simulator import presets
+from mesa_diode import config
+from mesa_diode.simulator import desktop, presets, tutorial
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_settings(tmp_path, monkeypatch):
+    """Настройки пользователя (~/.mesa_diode: папка с данными, масштаб окна) не влияют
+    на тесты: каталог данных — только из MESA_DATA_DIR."""
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "user" / "config.json")
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "user" / "settings.json")
+    monkeypatch.setattr(tutorial, "SETTINGS_PATH", tmp_path / "user" / "settings.json")
 
 
 @pytest.fixture

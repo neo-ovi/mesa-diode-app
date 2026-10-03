@@ -15,11 +15,11 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from mesa_diode.simulator import datafile, defects, hints, presets
+from mesa_diode.simulator import datafile, defects, desktop, hints, presets
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator.widgets import Tooltip
 
-FONT = ("Segoe UI", 9)
+FONT = desktop.TEXT
 CURRENT = "текущий образец"
 EXAMPLE = datafile.EXAMPLES_DIR / "defects_example.csv"
 
@@ -34,7 +34,7 @@ class DefectsWindow(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.title("Методы контроля дефектов: травление, АСМ, XRD")
-        self.geometry("1250x820")
+        desktop.fit_window(self, 1250, 820)
         self.others = []                     # образцы из наборов и таблиц
         self.x_key = tk.StringVar(value="xrd_density")
         self._build()
@@ -44,7 +44,7 @@ class DefectsWindow(tk.Toplevel):
     def _build(self):
         top = ttk.Frame(self, padding=(8, 6))
         top.pack(fill=tk.X)
-        ttk.Label(top, text=hints.plain(INTRO), wraplength=1200, justify="left", font=FONT).pack(anchor="w")
+        ttk.Label(top, text=hints.plain(INTRO), wraplength=desktop.px(1200), justify="left", font=FONT).pack(anchor="w")
 
         bar = ttk.Frame(self, padding=(8, 0))
         bar.pack(fill=tk.X)
@@ -73,25 +73,25 @@ class DefectsWindow(tk.Toplevel):
         body.add(left, weight=3)
         body.add(right, weight=2)
 
-        ttk.Label(left, text="Текущий образец: методы", font=(FONT[0], 9, "bold")).pack(anchor="w")
+        ttk.Label(left, text="Текущий образец: методы", font=desktop.BOLD).pack(anchor="w")
         self.methods = ttk.Treeview(left, columns=("n", "ratio", "tau"), height=4)
         for col, text, width in (("#0", "метод", 230), ("n", "плотность, см⁻²", 130),
                                  ("ratio", "к EPD", 90), ("tau", "τ_dis (5.10), с", 120)):
             self.methods.heading(col, text=text)
-            self.methods.column(col, width=width, anchor="w" if col == "#0" else "center")
+            self.methods.column(col, width=desktop.px(width), anchor="w" if col == "#0" else "center")
         self.methods.pack(fill=tk.X)
 
-        ttk.Label(left, text="Образцы", font=(FONT[0], 9, "bold")).pack(anchor="w", pady=(6, 0))
+        ttk.Label(left, text="Образцы", font=desktop.BOLD).pack(anchor="w", pady=(6, 0))
         cols = ("epd", "afm", "rms", "fwhm", "nx", "r")
         self.table = ttk.Treeview(left, columns=cols, height=8)
         for col, text, width in (("#0", "образец", 150), ("epd", "EPD", 80), ("afm", "АСМ", 80),
                                  ("rms", "RMS, нм", 65), ("fwhm", "Δω₁/₂, ″", 65), ("nx", "N_XRD", 85),
                                  ("r", "EPD/N_XRD", 80)):
             self.table.heading(col, text=text)
-            self.table.column(col, width=width, anchor="w" if col == "#0" else "center")
+            self.table.column(col, width=desktop.px(width), anchor="w" if col == "#0" else "center")
         self.table.pack(fill=tk.X)
 
-        ttk.Label(left, text="Выводы", font=(FONT[0], 9, "bold")).pack(anchor="w", pady=(6, 0))
+        ttk.Label(left, text="Выводы", font=desktop.BOLD).pack(anchor="w", pady=(6, 0))
         self.text = tk.Text(left, wrap="word", height=14, font=FONT, relief="flat",
                             background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
         self.text.pack(fill=tk.BOTH, expand=True)
@@ -121,7 +121,7 @@ class DefectsWindow(tk.Toplevel):
 
     def add_table(self, path=None):
         path = path or filedialog.askopenfilename(parent=self, title="Таблица образцов",
-                                                  filetypes=datafile.FILE_TYPES)
+                                                  filetypes=desktop.file_types(datafile.FILE_TYPES))
         if not path:
             return
         try:

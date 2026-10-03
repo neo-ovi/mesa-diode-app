@@ -5,31 +5,33 @@
 import tkinter as tk
 from tkinter import ttk
 
-from mesa_diode.simulator import hints
+from mesa_diode.simulator import desktop, hints
 from mesa_diode.simulator.scheme import elements, formula_lines, model_summary
 
 
 class SchemePanel(ttk.Frame):
     """Схема (Canvas с подсказками у элементов) и формула с расчётом точки."""
 
-    WIDTH, HEIGHT = 410, 250
+    WIDTH, HEIGHT = 410, 250        # в точках вёрстки; на экране — desktop.px()
 
     def __init__(self, parent):
         super().__init__(parent, padding=(6, 4, 6, 4))
-        self.title = ttk.Label(self, text="", font=("Segoe UI", 10, "bold"))
+        self.title = ttk.Label(self, text="", font=desktop.LARGE_BOLD)
         self.title.pack(anchor="w")
-        self.summary = ttk.Label(self, text="", wraplength=self.WIDTH, justify="left",
-                                 font=("Segoe UI", 9), foreground="#444444")
+        self.summary = ttk.Label(self, text="", wraplength=desktop.px(self.WIDTH), justify="left",
+                                 font=desktop.TEXT, foreground="#444444")
         self.summary.pack(anchor="w", fill=tk.X, pady=(0, 4))
-        self.canvas = tk.Canvas(self, width=self.WIDTH, height=self.HEIGHT, background="white",
+        self.canvas = tk.Canvas(self, width=desktop.px(self.WIDTH), height=desktop.px(self.HEIGHT),
+                                background="white",
                                 highlightthickness=1, highlightbackground="#cccccc")
         self.canvas.pack(anchor="w")
         ttk.Label(self, text="Наведите на элемент схемы — что это и почему он здесь.",
-                  font=("Segoe UI", 8), foreground="#777777").pack(anchor="w")
-        self.text = tk.Text(self, wrap="word", width=62, height=22, font=("DejaVu Sans Mono", 8),
-                            relief="flat", background="#fbfbf6")
+                  font=desktop.SMALL, foreground="#777777").pack(anchor="w")
+        self.text = tk.Text(self, wrap="word", width=62, height=22, font=desktop.MONO,
+                            relief="flat", background="#fbfbf6", foreground="#000000")
         self.text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         self._tip = None
+        self._labels = []           # подписи схемы: белый фон под ними — после масштабирования
 
     # --- подсказки у элементов Canvas
     def _show_tip(self, event, text):
@@ -37,7 +39,8 @@ class SchemePanel(ttk.Frame):
         tip = tk.Toplevel(self)
         tip.wm_overrideredirect(True)
         tk.Label(tip, text=hints.plain(text), justify="left", background="#ffffe8", relief="solid",
-                 borderwidth=1, wraplength=380, font=("Segoe UI", 9), padx=6, pady=4).pack()
+                 foreground="#000000", borderwidth=1, wraplength=desktop.px(380), font=desktop.TEXT,
+                 padx=6, pady=4).pack()
         tip.update_idletasks()
         x, y = event.x_root + 14, event.y_root + 10
         if x + tip.winfo_reqwidth() > self.winfo_screenwidth():        # у правого края — левее курсора
@@ -75,16 +78,29 @@ class SchemePanel(ttk.Frame):
                 c.create_line(x - 14, y + 16, x + 14, y - 16, arrow=tk.LAST, fill=color, tags=tag)
 
     def _label(self, x, y, text, color, width, tag):
-        """Подпись на белом фоне — читается поверх линий схемы."""
-        c = self.canvas
-        item = c.create_text(x, y, text=text, font=("Segoe UI", 8), fill=color, width=width, tags=tag)
-        x0, y0, x1, y1 = c.bbox(item)
-        back = c.create_rectangle(x0 - 1, y0, x1 + 1, y1, fill="white", outline="", tags=tag)
-        c.tag_raise(item, back)
+        """Подпись на белом фоне — читается поверх линий схемы (фон — в _finish)."""
+        self._labels.append(self.canvas.create_text(x, y, text=text, font=desktop.SMALL, fill=color,
+                                                    width=desktop.px(width), tags=tag))
+
+    def _finish(self):
+        """Схема нарисована в точках вёрстки. При масштабе окна ≠ 1 (HiDPI) растянуть
+        координаты и толщину линий (шрифты в пунктах растут сами); затем — белый фон
+        под подписями."""
+        c, k = self.canvas, desktop.SCALE
+        if k != 1:
+            c.scale("all", 0, 0, k, k)
+            for item in c.find_all():
+                if c.type(item) != "text":
+                    c.itemconfigure(item, width=float(c.itemcget(item, "width") or 1) * k)
+        for item in self._labels:
+            x0, y0, x1, y1 = c.bbox(item)
+            back = c.create_rectangle(x0 - 1, y0, x1 + 1, y1, fill="white", outline="", tags=c.gettags(item))
+            c.tag_raise(item, back)
 
     def draw(self, s, mode):
         c = self.canvas
         c.delete("all")
+        self._labels = []
         self._hide_tip()
         branches, series = elements(s, mode)
         top, bottom, mid = 45, 205, 125
@@ -92,8 +108,8 @@ class SchemePanel(ttk.Frame):
         step = max(52, min(80, (self.WIDTH - x_node - 30) // max(len(branches) - 1, 1)))
         xs = [x_node + i * step for i in range(len(branches))]
         # клеммы и R_s
-        c.create_text(14, top, text="+", font=("Segoe UI", 12, "bold"))
-        c.create_text(14, bottom, text="−", font=("Segoe UI", 12, "bold"))
+        c.create_text(14, top, text="+", font=desktop.BIG_BOLD)
+        c.create_text(14, bottom, text="−", font=desktop.BIG_BOLD)
         c.create_line(24, top, 60, top, width=1.5)
         c.create_line(24, bottom, xs[-1], bottom, width=1.5)
         c.create_line(100, top, xs[-1], top, width=1.5)
@@ -115,11 +131,12 @@ class SchemePanel(ttk.Frame):
             self._label(x, mid + 36, element.label, color, step - 6, tag)
             self._bind(tag, element.tip)
         # напряжения
-        c.create_text(40, (top + bottom) / 2, text="V", font=("Segoe UI", 10, "italic"))
+        c.create_text(40, (top + bottom) / 2, text="V", font=desktop.LARGE_ITALIC)
         c.create_line(40, top + 14, 40, bottom - 14, arrow=tk.BOTH, fill="#888888")
-        c.create_text(xs[0] - 22, bottom - 16, text="V_д", font=("Segoe UI", 8, "italic"), fill="#555555")
+        c.create_text(xs[0] - 22, bottom - 16, text="V_д", font=desktop.SMALL_ITALIC, fill="#555555")
         c.create_text(self.WIDTH / 2, bottom + 28, text="V = V_д + I·R_s;  I — сумма токов ветвей",
-                      font=("Segoe UI", 8), fill="#555555")
+                      font=desktop.SMALL, fill="#555555")
+        self._finish()
 
     def show(self, s, mode):
         """Обновить панель по структуре s в режиме mode."""

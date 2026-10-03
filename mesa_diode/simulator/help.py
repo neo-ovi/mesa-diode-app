@@ -5,30 +5,22 @@
   1) параметр "metodichka_path" в ~/.mesa_diode/config.json;
   2) переменная окружения MESA_DIODE_DOCS — каталог с METODICHKA.pdf/.docx;
   3) каталог docs/ в каталоге данных: $MESA_DATA_DIR/docs/ (переменная
-     из .env, см. mesa_diode/config.py).
+     из .env, см. mesa_diode/config.py);
+  4) каталог docs/ в папке с данными, выбранной в программе
+     («Настройки → Папка с данными»).
 Если файл не найден, программа просит указать его и запоминает путь в
-конфиге. Файл открывается системным приложением.
+конфиге. Файл открывается системным приложением (desktop.open_path).
 """
 
-import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 from mesa_diode import config
+from mesa_diode.simulator import desktop
 
-CONFIG_PATH = Path.home() / ".mesa_diode" / "config.json"
 CONFIG_KEY = "metodichka_path"
 DOCS_ENV = "MESA_DIODE_DOCS"
 KINDS = {"pdf": "METODICHKA.pdf", "docx": "METODICHKA.docx"}
-
-
-def _read_config(config_path):
-    try:
-        return json.loads(Path(config_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
 
 
 def _from_location(location, kind):
@@ -41,17 +33,20 @@ def _from_location(location, kind):
     return candidate if candidate.is_file() else None
 
 
-def find_metodichka(kind="pdf", config_path=CONFIG_PATH, environ=None):
+def find_metodichka(kind="pdf", config_path=None, environ=None):
     """Путь к METODICHKA.pdf / .docx или None (без исключений)."""
     environ = os.environ if environ is None else environ
     locations = []
-    configured = _read_config(config_path).get(CONFIG_KEY)
+    configured = config.read_user_config(config_path).get(CONFIG_KEY)
     if configured:
         locations.append(configured)
     if environ.get(DOCS_ENV):
         locations.append(environ[DOCS_ENV])
     if environ.get(config.ENV_VAR):
         locations.append(Path(environ[config.ENV_VAR]) / "docs")
+    saved = config.saved_data_dir(config_path)
+    if saved:
+        locations.append(saved / "docs")
     for location in locations:
         try:
             found = _from_location(location, kind)
@@ -62,26 +57,13 @@ def find_metodichka(kind="pdf", config_path=CONFIG_PATH, environ=None):
     return None
 
 
-def save_metodichka_path(path, config_path=CONFIG_PATH):
-    config_path = Path(config_path)
-    data = _read_config(config_path)
-    data[CONFIG_KEY] = str(Path(path))
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_metodichka_path(path, config_path=None):
+    config.write_user_config(CONFIG_KEY, str(Path(path)), config_path)
 
 
 def open_with_system(path):
     """Открывает файл системным приложением. Возвращает текст ошибки или None."""
-    try:
-        if sys.platform.startswith("win"):
-            os.startfile(str(path))  # noqa: S606 — штатный способ Windows
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
-        else:
-            subprocess.Popen(["xdg-open", str(path)])
-    except (OSError, AttributeError) as e:
-        return str(e)
-    return None
+    return desktop.open_path(path)
 
 
 def open_metodichka(parent, kind="pdf"):
@@ -92,11 +74,12 @@ def open_metodichka(parent, kind="pdf"):
     if path is None:
         messagebox.showinfo(
             "Методичка",
-            "Методичка хранится в приватном репозитории данных. Укажите файл "
-            "METODICHKA.pdf или METODICHKA.docx.", parent=parent)
+            "Методичка хранится в приватном репозитории данных (папка docs). Укажите файл "
+            "METODICHKA.pdf или METODICHKA.docx — или всю папку с данными: "
+            "«Настройки → Папка с данными».", parent=parent)
         chosen = filedialog.askopenfilename(
             parent=parent, title="Файл методички",
-            filetypes=[("Методичка", "*.pdf *.docx"), ("Все файлы", "*.*")])
+            filetypes=desktop.file_types([("Методичка", "*.pdf *.docx"), ("Все файлы", "*.*")]))
         if not chosen:
             return
         save_metodichka_path(chosen)

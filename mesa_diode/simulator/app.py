@@ -14,6 +14,8 @@
 """
 
 import math
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -26,6 +28,8 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from mesa_diode import config
+from mesa_diode.simulator import desktop
 from mesa_diode.simulator import fitting
 from mesa_diode.simulator import models
 from mesa_diode.simulator import physics as ph
@@ -44,6 +48,7 @@ from mesa_diode.simulator.plot_utils import (
     adaptive_point_count, adaptive_voltage_range, auto_scale, robust_value_limits,
 )
 from mesa_diode.simulator.style import MAX_DATASETS, dataset_style, remaining_slots
+from mesa_diode.simulator import __version__
 
 UM = 1e-4
 SCENARIO_COLORS = {ph.SCENARIO_A: "#1f4fb2", ph.SCENARIO_B: "#c0392b"}
@@ -58,12 +63,12 @@ COMPONENT_STYLE = {
     "L": ("I_L", "#9467bd"),
 }
 JS_COLOR = "#9b870c"
-FONT = ("Segoe UI", 9)
+FONT = desktop.TEXT
 
 # Разделы боковой панели по порядку работы: (заголовок, ключи) — hints.FIELD_GROUPS.
 SIDEBAR_GROUPS = [(title, keys) for title, keys, _about in hints.FIELD_GROUPS]
 BOUNDARY_TITLE = "Граничные условия и опции"
-SIDEBAR_WIDTH = 380
+SIDEBAR_WIDTH = 380      # в точках вёрстки; на экране — desktop.px()
 GRAPH_TABS = (("iv", "ВАХ"), ("cv", "ВФХ и 1/C²"), ("jv", "Плотность тока |J|–V"))
 # Короткие подписи в основном окне; полные — в таблице параметров окна формул.
 SHORT_LABELS = {
@@ -126,10 +131,13 @@ def _fmt(value):
 
 class MesaApp(tk.Tk):
     def __init__(self):
-        super().__init__()
+        super().__init__(className=desktop.WM_CLASS)
+        # До первого виджета: масштаб, шрифты, тема, клавиши (особенности Linux — desktop.py).
+        self.ui_scale, self.ui_scale_source = desktop.setup(self)
+        desktop.set_icon(self)
         self.title("Симулятор мезадиода Ge — ВАХ, ВФХ, J–V")
-        self.geometry("1700x1020")
-        self.minsize(1250, 800)
+        desktop.fit_window(self, 1700, 1020, 1250, 800, maximize=True)
+        self._error_shown = False
 
         self.preset = presets.startup_preset()
         self.exp_iv = []   # {"label", "path", "voltage", "value"}
@@ -190,7 +198,7 @@ class MesaApp(tk.Tk):
         self._build_menu()
         self._build_toolbar()
         self._build_mode_bar()
-        self.status_lbl = ttk.Label(self, text="", font=("Segoe UI", 9, "bold"), anchor="w",
+        self.status_lbl = ttk.Label(self, text="", font=desktop.BOLD, anchor="w",
                                     padding=(8, 3), relief="sunken")
         self.status_lbl.pack(side=tk.BOTTOM, fill=tk.X)
         Tooltip(self.status_lbl, hints.plain(hints.with_reference(hints.STATUS_HINT, "vbi")),
@@ -215,14 +223,14 @@ class MesaApp(tk.Tk):
         self.tutorial_targets.update(graph=self.graph_tabs, results=self.results_tabs, scheme=self.scheme,
                                      load_iv=self.toolbar_buttons["Загрузить ВАХ"])
         ttk.Style(self).configure("Auto.TEntry", foreground=AUTO_COLOR)
-        ttk.Style(self).configure("Section.TButton", anchor="w", font=("Segoe UI", 9, "bold"))
-        ttk.Style(self).configure("Mode.Toolbutton", font=("Segoe UI", 10, "bold"), padding=(12, 4))
+        ttk.Style(self).configure("Section.TButton", anchor="w", font=desktop.BOLD)
+        ttk.Style(self).configure("Mode.Toolbutton", font=desktop.LARGE_BOLD, padding=(12, 4))
 
     def _build_mode_bar(self):
         """Режим — главный переключатель: три «экрана» с одинаковой компоновкой."""
         bar = ttk.Frame(self, padding=(6, 6, 6, 0))
         bar.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(bar, text="Режим:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(bar, text="Режим:", font=desktop.LARGE_BOLD).pack(side=tk.LEFT, padx=(0, 6))
         self.mode_buttons = {}
         for index, mode in enumerate(presets.MODES, 1):
             button = ttk.Radiobutton(bar, text=f"{index}. {presets.MODE_LABELS[mode]}", value=mode,
@@ -263,6 +271,7 @@ class MesaApp(tk.Tk):
         sets_menu.add_command(label="Сбросить к опорному", command=self.reset_to_reference)
         sets_menu.add_command(label="Новый образец (пустые поля)", command=self.new_sample)
         menubar.add_cascade(label="Наборы", menu=sets_menu)
+        menubar.add_cascade(label="Настройки", menu=self._build_settings_menu(menubar))
         self.help_menu = tk.Menu(menubar, tearoff=0)
         self.help_menu.add_command(label="Обучение: первое моделирование", command=self.start_tutorial)
         self.help_menu.add_command(label="Формулы и параметры", command=self.open_formulas_window)
@@ -274,6 +283,25 @@ class MesaApp(tk.Tk):
                                    command=lambda: help_module.open_metodichka(self, "docx"))
         menubar.add_cascade(label="Справка", menu=self.help_menu)
         self.config(menu=menubar)
+
+    def _build_settings_menu(self, menubar):
+        """«Настройки»: папка с данными, масштаб окна, пункт в меню приложений (Linux)."""
+        menu = tk.Menu(menubar, tearoff=0)
+        menu.add_command(label="Папка с данными...", command=self.choose_data_dir)
+        scale_menu = tk.Menu(menu, tearoff=0)
+        saved = desktop.read_settings().get(desktop.SCALE_KEY)
+        self.scale_choice = tk.StringVar(value=str(float(saved)) if saved else "auto")
+        auto = f"Авто — как в системе (сейчас {round(100 * self.ui_scale)} %)"
+        scale_menu.add_radiobutton(label=auto, value="auto", variable=self.scale_choice,
+                                   command=self._on_scale_choice)
+        for value in desktop.SCALE_CHOICES:
+            scale_menu.add_radiobutton(label=f"{round(100 * value)} %", value=str(float(value)),
+                                       variable=self.scale_choice, command=self._on_scale_choice)
+        menu.add_cascade(label="Масштаб интерфейса", menu=scale_menu)
+        if sys.platform.startswith("linux"):
+            menu.add_separator()
+            menu.add_command(label="Добавить в меню приложений...", command=self.install_menu_entry)
+        return menu
 
     def _build_toolbar(self):
         self.toolbar_buttons = {}
@@ -315,7 +343,7 @@ class MesaApp(tk.Tk):
         actions = ttk.Frame(parent, padding=(4, 6, 8, 4))
         actions.pack(side=tk.BOTTOM, fill=tk.X)
         self._build_actions(actions)
-        canvas = tk.Canvas(parent, width=SIDEBAR_WIDTH, highlightthickness=0,
+        canvas = tk.Canvas(parent, width=desktop.px(SIDEBAR_WIDTH), highlightthickness=0,
                            background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
         scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=scroll.set)
@@ -350,7 +378,7 @@ class MesaApp(tk.Tk):
         # Параметры
         step = self._step(body, "Параметры")
         self.fields_info = ttk.Label(step, text="", foreground="#333333", font=FONT,
-                                     wraplength=SIDEBAR_WIDTH - 40, justify="left")
+                                     wraplength=desktop.px(SIDEBAR_WIDTH - 40), justify="left")
         self.fields_info.pack(anchor="w", fill=tk.X)
         Tooltip(self.fields_info, hints.plain(hints.with_reference(hints.FIELDS_HINT, "modes")), wraplength=520)
         show_all = ttk.Checkbutton(step, text="показать скрытые поля (серые)",
@@ -358,7 +386,7 @@ class MesaApp(tk.Tk):
         show_all.pack(anchor="w", pady=(2, 0))
         Tooltip(show_all, hints.plain(hints.SHOW_ALL_HINT))
         self.lock_note = ttk.Label(step, text="", foreground="#555555", font=FONT,
-                                   wraplength=SIDEBAR_WIDTH - 40, justify="left")
+                                   wraplength=desktop.px(SIDEBAR_WIDTH - 40), justify="left")
         self.lock_note.pack(anchor="w", fill=tk.X, pady=(2, 0))
         Tooltip(self.lock_note, hints.plain(hints.with_reference(hints.LOCK_HINT, "lock")), wraplength=520)
         self.tutorial_targets["params"] = step
@@ -366,7 +394,7 @@ class MesaApp(tk.Tk):
         for title, keys in SIDEBAR_GROUPS:
             section = self._section(step, title)
             section.note = ttk.Label(section.body, text="", foreground="#555555", font=FONT,
-                                     wraplength=SIDEBAR_WIDTH - 50, justify="left")
+                                     wraplength=desktop.px(SIDEBAR_WIDTH - 50), justify="left")
             section.note.grid(row=0, column=0, columnspan=4, sticky="w")
             for row_index, key in enumerate(keys, 1):
                 self._param_row(section.body, row_index, key)
@@ -604,7 +632,8 @@ class MesaApp(tk.Tk):
         """Галочки кривых графика plot; подсказка — что это за кривая."""
         bar = ttk.Frame(tab)
         bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 2))
-        caption = ttk.Label(bar, text="", foreground="#555555", font=FONT, wraplength=900, justify="left")
+        caption = ttk.Label(bar, text="", foreground="#555555", font=FONT, wraplength=desktop.px(900),
+                            justify="left")
         caption.pack(side=tk.BOTTOM, anchor="w", fill=tk.X)
         Tooltip(caption, hints.plain(hints.with_reference(hints.CURVES_BY_MODEL_HINT, "curves")), wraplength=520)
         self.curve_captions[plot] = caption
@@ -632,15 +661,20 @@ class MesaApp(tk.Tk):
     def _build_fit_tab(self):
         tab = ttk.Frame(self.results_tabs, padding=4)
         self.results_tabs.add(tab, text="Подгонка и отклонения")
+        # таблица | пояснения | график отклонений; пояснения и график делят ширину 3:2 —
+        # на узком окне (ноутбук, крупный шрифт Linux) график не пропадает
+        tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(1, weight=3, uniform="fit")
+        tab.columnconfigure(2, weight=2, uniform="fit")
         left = ttk.Frame(tab)
-        left.pack(side=tk.LEFT, fill=tk.Y)
+        left.grid(row=0, column=0, sticky="ns")
         columns = ("value", "error", "unit")
         self.fit_table = ttk.Treeview(left, columns=columns, height=8, selectmode="none")
         self.fit_table.heading("#0", text="параметр")
         for column, text, width in (("value", "значение", 90), ("error", "±", 60), ("unit", "ед.", 60)):
             self.fit_table.heading(column, text=text)
-            self.fit_table.column(column, width=width, anchor="center")
-        self.fit_table.column("#0", width=140)
+            self.fit_table.column(column, width=desktop.px(width), anchor="center")
+        self.fit_table.column("#0", width=desktop.px(140))
         self.fit_table.pack(side=tk.TOP, fill=tk.Y, expand=True)
         buttons = ttk.Frame(left)
         buttons.pack(side=tk.TOP, fill=tk.X, pady=(3, 0))
@@ -648,8 +682,8 @@ class MesaApp(tk.Tk):
                                           command=self.undo_fit, state="disabled")
         self.undo_fit_button.pack(side=tk.LEFT)
         middle = ttk.Frame(tab)
-        middle.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6)
-        self.fit_text = tk.Text(middle, wrap="word", height=9, width=60, font=FONT, relief="flat",
+        middle.grid(row=0, column=1, sticky="nsew", padx=6)
+        self.fit_text = tk.Text(middle, wrap="word", height=9, width=40, font=FONT, relief="flat",
                                 background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
         self.fit_text.pack(fill=tk.BOTH, expand=True)
         self._set_fit_text(hints.FIT_EMPTY_TEXT)
@@ -657,7 +691,7 @@ class MesaApp(tk.Tk):
         self.resid_fig.subplots_adjust(left=0.2, right=0.97, bottom=0.22, top=0.86)
         self.ax_resid = self.resid_fig.add_subplot(111)
         self.resid_canvas = FigureCanvasTkAgg(self.resid_fig, master=tab)
-        self.resid_canvas.get_tk_widget().pack(side=tk.RIGHT, fill=tk.Y)
+        self.resid_canvas.get_tk_widget().grid(row=0, column=2, sticky="nsew")
         Tooltip(self.resid_canvas.get_tk_widget(), hints.plain(hints.RESIDUAL_HINT))
 
     def _set_fit_text(self, text):
@@ -670,7 +704,7 @@ class MesaApp(tk.Tk):
         box = ttk.Frame(self.results_tabs, padding=6)
         self.results_tabs.add(box, text="Идеальность n")
         row = 0
-        ttk.Label(box, text="n_эксп", font=("Segoe UI", 9, "bold")).grid(row=row, column=0, sticky="w")
+        ttk.Label(box, text="n_эксп", font=desktop.BOLD).grid(row=row, column=0, sticky="w")
         n_entry = ttk.Entry(box, textvariable=self.n_exp_var, width=10, justify="center", state="readonly")
         n_entry.grid(row=row, column=1, padx=3, sticky="w")
         Tooltip(n_entry, "Коэффициент идеальности по прямой ветви первой загруженной ВАХ (§6.3). "
@@ -696,7 +730,7 @@ class MesaApp(tk.Tk):
         self.n2_button.pack(side=tk.LEFT)
         row += 1
         self.ideality_lbl = ttk.Label(box, text="", foreground="#b35c00", font=FONT,
-                                      wraplength=900, justify="left")
+                                      wraplength=desktop.px(900), justify="left")
         self.ideality_lbl.grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
         Tooltip(self.ideality_lbl, hints.plain(hints.reference("ideality")))
 
@@ -766,7 +800,7 @@ class MesaApp(tk.Tk):
             messagebox.showerror("Ошибка ввода параметров", hints.with_error_reference(str(e)))
             return
         path = filedialog.asksaveasfilename(title="Сохранить набор образца", defaultextension=".json",
-                                            filetypes=[("Набор образца", "*.json")])
+                                            filetypes=desktop.file_types([("Набор образца", "*.json")]))
         if not path:
             return
         preset = presets.Preset(name=Path(path).stem, params=params, metadata=self.preset.metadata,
@@ -777,8 +811,9 @@ class MesaApp(tk.Tk):
         self.preset_label.config(text=f"Набор: {self.preset.name}")
 
     def load_preset(self):
-        path = filedialog.askopenfilename(title="Загрузить набор образца",
-                                          filetypes=[("Набор образца", "*.json"), ("Все файлы", "*.*")])
+        path = filedialog.askopenfilename(title="Загрузить набор образца", initialdir=self._samples_dir(),
+                                          filetypes=desktop.file_types([("Набор образца", "*.json"),
+                                                                        ("Все файлы", "*.*")]))
         if not path:
             return
         try:
@@ -1120,7 +1155,7 @@ class MesaApp(tk.Tk):
                 "value": report.value, "report": report}
 
     def _load_experimental_files(self, dialog_title, target_list, error_title, kind):
-        paths = filedialog.askopenfilenames(title=dialog_title, filetypes=datafile.FILE_TYPES)
+        paths = filedialog.askopenfilenames(title=dialog_title, filetypes=desktop.file_types(datafile.FILE_TYPES))
         if not paths:
             return
         slots = remaining_slots(len(target_list))
@@ -1185,7 +1220,8 @@ class MesaApp(tk.Tk):
 
     def check_data_file(self):
         """Разбор файла без загрузки: все замечания, включая «сделано»."""
-        path = filedialog.askopenfilename(title="Проверить файл данных", filetypes=datafile.FILE_TYPES)
+        path = filedialog.askopenfilename(title="Проверить файл данных",
+                                          filetypes=desktop.file_types(datafile.FILE_TYPES))
         if not path:
             return
         kind = datafile.KIND_CV if messagebox.askyesno(
@@ -1597,6 +1633,88 @@ class MesaApp(tk.Tk):
     def open_formulas_window(self):
         formulas_module.open_formulas_window(self)
 
+    # ------------------------------------------------ настройки
+    def _samples_dir(self):
+        """Папка samples каталога данных — начальная папка диалога наборов (или None)."""
+        try:
+            folder = config.data_dir() / "samples"
+        except RuntimeError:
+            return None
+        return str(folder) if folder.is_dir() else None
+
+    def choose_data_dir(self):
+        """«Настройки → Папка с данными»: где наборы образцов и методичка (методичка, п. 1А.22)."""
+        current, source = config.data_dir_setting()
+        text = hints.plain(hints.with_reference(hints.DATA_DIR_HINT, "settings"))
+        if source == "env":
+            text += "\n\n" + hints.DATA_DIR_ENV_NOTE.format(var=config.ENV_VAR, path=current)
+        elif current:
+            text += f"\n\nСейчас: {current}"
+        if not messagebox.askokcancel("Папка с данными", text, parent=self):
+            return
+        chosen = filedialog.askdirectory(parent=self, title="Папка с данными (в ней — папки samples и docs)",
+                                         initialdir=str(current) if current and current.is_dir() else None,
+                                         mustexist=True)
+        if not chosen:
+            return
+        folder = Path(chosen)
+        if not ((folder / "samples").is_dir() or (folder / "docs").is_dir()) and not messagebox.askyesno(
+                "Папка с данными", f"В папке {folder} нет подпапок samples и docs — похоже, это не папка "
+                "с данными. Всё равно выбрать её?", parent=self):
+            return
+        try:
+            config.save_data_dir(folder)
+        except OSError as e:
+            messagebox.showerror("Папка с данными", f"Не удалось сохранить настройку: {e}", parent=self)
+            return
+        text = (f"Папка с данными: {folder}\nНаборов образцов в ней: {len(presets.data_presets())}. Наборы "
+                "открываются кнопкой «Загрузить набор», методичка — из меню «Справка».")
+        if source == "env":
+            text += "\n\n" + hints.DATA_DIR_ENV_NOTE.format(var=config.ENV_VAR, path=current)
+        messagebox.showinfo("Папка с данными", text, parent=self)
+
+    def _on_scale_choice(self):
+        """«Настройки → Масштаб интерфейса»: применяется при следующем запуске."""
+        value = self.scale_choice.get()
+        desktop.write_setting(desktop.SCALE_KEY, None if value == "auto" else float(value))
+        text = hints.SCALE_RESTART_NOTE
+        if os.environ.get(desktop.SCALE_ENV):
+            text += "\n\n" + hints.SCALE_ENV_NOTE.format(var=desktop.SCALE_ENV)
+        messagebox.showinfo("Масштаб интерфейса", text, parent=self)
+
+    def install_menu_entry(self):
+        """Linux: пункт программы в меню приложений со значком (методичка, п. 1А.22)."""
+        entry, _icon = desktop.menu_entry_paths()
+        if entry.exists():
+            answer = messagebox.askyesnocancel(
+                "Меню приложений", "Пункт программы уже есть в меню приложений.\n\n«Да» — обновить его "
+                "(например, если файл программы перемещён), «Нет» — убрать из меню.", parent=self)
+            if answer is None:
+                return
+            if not answer:
+                desktop.remove_menu_entry()
+                messagebox.showinfo("Меню приложений", "Пункт убран из меню приложений.", parent=self)
+                return
+        if desktop.is_frozen() and desktop.on_removable_drive(sys.executable) and not messagebox.askyesno(
+                "Меню приложений", hints.MENU_ENTRY_REMOVABLE_NOTE, parent=self):
+            return
+        try:
+            path = desktop.install_menu_entry(self)
+        except (OSError, tk.TclError) as e:
+            messagebox.showerror("Меню приложений", f"Не удалось добавить пункт меню: {e}", parent=self)
+            return
+        messagebox.showinfo("Меню приложений", hints.MENU_ENTRY_DONE.format(name=desktop.APP_NAME, path=path),
+                            parent=self)
+
+    def report_callback_exception(self, exc, value, tb):
+        """Ошибка в обработчике кнопки или таймера: в журнал ~/.mesa_diode/errors.log и
+        коротко — на экран (у программы, запущенной без терминала, вывода ошибок не видно)."""
+        path = desktop.log_error(exc, value, tb)
+        if not self._error_shown:
+            self._error_shown = True
+            messagebox.showerror("Ошибка программы", f"{exc.__name__}: {value}\n\nПодробности записаны в "
+                                 f"{path}. Программа продолжает работу.", parent=self)
+
     # ------------------------------------------------ обучение
     def start_tutorial(self):
         """Обучение: первое моделирование в базовом режиме (tutorial.STEPS)."""
@@ -1622,9 +1740,26 @@ class MesaApp(tk.Tk):
         self.recompute()
 
 
-def main():
+def main(argv=None):
+    """Запуск окна. Ключи: --check — проверка окружения без работы в окне
+    (selfcheck.py), --version — версия."""
+    args = sys.argv[1:] if argv is None else list(argv)
+    if "--version" in args:
+        print(f"{desktop.APP_NAME} {__version__}")
+        return
+    if "--check" in args:
+        from mesa_diode.simulator import selfcheck
+        sys.exit(selfcheck.run())
     matplotlib.rcParams["font.family"] = "DejaVu Sans"
-    app = MesaApp()
+    try:
+        app = MesaApp()
+    except tk.TclError as e:
+        if "display" in str(e).lower():
+            sys.exit(hints.NO_DISPLAY_TEXT)
+        raise
+    except Exception:
+        desktop.show_startup_error(desktop.log_error(*sys.exc_info()))
+        sys.exit(1)
     app.mainloop()
 
 

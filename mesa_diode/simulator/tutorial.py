@@ -10,17 +10,15 @@
 Пример ВАХ — синтетика по модельной структуре (presets.DEFAULT_PARAMS), не
 данные образца."""
 
-import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
-from mesa_diode.simulator import presets
+from mesa_diode.simulator import desktop, presets
 from mesa_diode.simulator import physics as ph
 
-SETTINGS_PATH = Path.home() / ".mesa_diode" / "settings.json"
+SETTINGS_PATH = desktop.SETTINGS_PATH
 DISABLE_ENV = "MESA_NO_TUTORIAL"
 EXAMPLE_LABEL = "пример ВАХ (модельный образец)"
 # Элементы окна, на которые указывает обучение (app.tutorial_targets).
@@ -91,23 +89,13 @@ def should_autostart():
     """Показывать ли обучение при запуске: первый запуск и автозапуск не отключён."""
     if os.environ.get(DISABLE_ENV):
         return False
-    try:
-        return not json.loads(SETTINGS_PATH.read_text(encoding="utf-8")).get("tutorial_done")
-    except (OSError, ValueError):
-        return True
+    return not desktop.read_settings(SETTINGS_PATH).get("tutorial_done")
 
 
 def mark_done():
-    """Запомнить, что обучение пройдено (или закрыто) — больше само не открывается."""
-    try:
-        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        if SETTINGS_PATH.is_file():
-            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        data["tutorial_done"] = True
-        SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    except (OSError, ValueError):
-        pass                               # настройки не сохранились — обучение покажется снова
+    """Запомнить, что обучение пройдено (или закрыто) — больше само не открывается.
+    Если настройки не сохранились, обучение просто покажется снова."""
+    desktop.write_setting("tutorial_done", True, SETTINGS_PATH)
 
 
 def example_iv(seed=7):
@@ -140,11 +128,11 @@ class TutorialWindow:
         self.window.protocol("WM_DELETE_WINDOW", self.finish)
         body = ttk.Frame(self.window, padding=10)
         body.pack(fill=tk.BOTH, expand=True)
-        self.counter = ttk.Label(body, foreground="#777777", font=("Segoe UI", 8))
+        self.counter = ttk.Label(body, foreground="#777777", font=desktop.SMALL)
         self.counter.pack(anchor="w")
-        self.title = ttk.Label(body, font=("Segoe UI", 11, "bold"))
+        self.title = ttk.Label(body, font=desktop.HEADING)
         self.title.pack(anchor="w", pady=(0, 4))
-        self.text = ttk.Label(body, wraplength=380, justify="left", font=("Segoe UI", 9))
+        self.text = ttk.Label(body, wraplength=desktop.px(380), justify="left", font=desktop.TEXT)
         self.text.pack(anchor="w", fill=tk.X)
         self.action = ttk.Button(body, command=self._run_action)
         self.action.pack(anchor="w", pady=(8, 0))
@@ -171,12 +159,13 @@ class TutorialWindow:
             frame.lift()
         # окно шага — справа от элемента, если там есть место, иначе слева;
         # у широкого элемента (строка режимов) — под ним, чтобы не закрывать его
-        sx = widget.winfo_rootx() + w + 20
-        sy = min(max(10, widget.winfo_rooty()), app.winfo_screenheight() - 320)
+        px = desktop.px
+        sx = widget.winfo_rootx() + w + px(20)
+        sy = min(max(10, widget.winfo_rooty()), app.winfo_screenheight() - px(320))
         if w > app.winfo_width() // 2:
-            sx, sy = widget.winfo_rootx() + 420, widget.winfo_rooty() + h + 12
-        elif sx + 420 > app.winfo_screenwidth():
-            sx = max(10, widget.winfo_rootx() - 440)
+            sx, sy = widget.winfo_rootx() + px(420), widget.winfo_rooty() + h + px(12)
+        elif sx + px(420) > app.winfo_screenwidth():
+            sx = max(10, widget.winfo_rootx() - px(440))
         self.window.geometry(f"+{sx}+{sy}")
 
     def show(self, index):

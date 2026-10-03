@@ -4,6 +4,8 @@
 
 import math
 
+from mesa_diode.simulator import desktop
+
 # Шаг от нуля вверх для параметров, где ноль допустим.
 ZERO_STEPS = {"N_dis": 1e3, "I_L": 1e-6}
 ZERO_STEP_DEFAULT = 0.1
@@ -66,8 +68,8 @@ class Tooltip:
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self._tip = tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)
-        tk.Label(tip, text=text, justify="left", background="#ffffe8", relief="solid",
-                 borderwidth=1, wraplength=self.wraplength, font=("Segoe UI", 9),
+        tk.Label(tip, text=text, justify="left", background="#ffffe8", foreground="#000000", relief="solid",
+                 borderwidth=1, wraplength=desktop.px(self.wraplength), font=desktop.TEXT,
                  padx=6, pady=4).pack()
         tip.update_idletasks()
         # не выходить за край экрана: у правого края — левее, у нижнего — над виджетом

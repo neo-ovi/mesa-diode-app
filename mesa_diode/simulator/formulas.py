@@ -36,7 +36,7 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
-from mesa_diode.simulator import hints
+from mesa_diode.simulator import desktop, hints
 from mesa_diode.simulator import physics as ph
 from mesa_diode.simulator import presets
 from mesa_diode.simulator.materials import GE, SIGMA_R, SIGMA_R_SOURCE
@@ -161,8 +161,8 @@ SECTIONS = [
                         note="Справочно: площадь боковой стенки; нужна для бэклога Б-3."),
                 _t("Слои структуры сверху вниз: n⁺ (d_{n}, N_{D}^{+}) / i-слой (d_{i} = d_{epi} − d_{n}, "
                    "N_{i}) / обогащённый галлием слой подложки (d_{s}, N_{As}) / подложка (d_{sub} − d_{s}, "
-                   "N_{A} по ρ_{sub} (2.8)). Обогащённый слой появляется при отжиге подложки перед ростом: "
-                   "Ga накапливается у поверхности, и концентрация там выше объёмной на порядки. Слоя нет, "
+                   "N_{A} по ρ_{sub} (2.8)). При термообработке примесь подложки может перераспределиться к "
+                   "поверхности, и её концентрация там выше объёмной [Кур74, с. 185–186]. Слоя нет, "
                    "если N_{As} = 0 или d_{s} = 0. Схема и разбор — Методичка, п. 2.6; на рисунке мезы — "
                    "полоса 5."),
                 Formula(r"$C(x)=C_{0}\exp\left(-\frac{x}{L}\right)+C_{e}\left[1-\exp\left(-\frac{x}{L}\right)\right]$",
@@ -887,11 +887,11 @@ def current_text(key, app):
 
 # --------------------------------------------------------------- вёрстка --
 
-TEXT_FONT = ("Segoe UI", 10)
-SMALL_FONT = ("Segoe UI", 8)
-BOLD_FONT = ("Segoe UI", 10, "bold")
-TITLE_FONT = ("Segoe UI", 13, "bold")
-SOURCE_FONT = ("Segoe UI", 8)
+TEXT_FONT = desktop.LARGE
+SMALL_FONT = desktop.SMALL
+BOLD_FONT = desktop.LARGE_BOLD
+TITLE_FONT = desktop.TITLE
+SOURCE_FONT = desktop.SMALL
 
 _INDEX_MARKUP = re.compile(r"([_^])\{([^{}]*)\}")
 
@@ -973,12 +973,13 @@ def _render_math(parent, tex, bg, fontsize=15, color="#000000"):
     """mathtext-строка → картинка PNG в Tk-подписи, обрезанная по тексту.
     PNG вместо отдельного холста matplotlib на каждую формулу: окно из
     сотни формул открывается в разы быстрее."""
-    fig = Figure(dpi=RENDER_DPI)
+    dpi = RENDER_DPI * desktop.SCALE           # HiDPI: формула растёт вместе с текстом окна
+    fig = Figure(dpi=dpi)
     FigureCanvasAgg(fig)
     fig.patch.set_facecolor(bg)
     fig.text(0, 0, tex, fontsize=fontsize, va="bottom", ha="left", color=color)
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=RENDER_DPI, bbox_inches="tight", pad_inches=0.03,
+    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.03,
                 facecolor=bg)
     image = tk.PhotoImage(master=parent, data=base64.b64encode(buffer.getvalue()))
     label = tk.Label(parent, image=image, background=bg, borderwidth=0, highlightthickness=0)
@@ -1017,8 +1018,7 @@ class FormulasWindow:
         self.app = app
         self.win = tk.Toplevel(app)
         self.win.title("Формулы и параметры")
-        self.win.geometry("1100x900")
-        self.win.minsize(760, 500)
+        desktop.fit_window(self.win, 1100, 900, 760, 500)
         self.bg = _background_hex(self.win)
         self.notebook = ttk.Notebook(self.win)
         self.notebook.pack(fill="both", expand=True)
@@ -1032,8 +1032,8 @@ class FormulasWindow:
         self._build_reference_tab()
 
         self.win.bind_all("<MouseWheel>", self._on_wheel)
-        self.win.bind_all("<Button-4>", lambda _e: self._active().canvas.yview_scroll(-3, "units"))
-        self.win.bind_all("<Button-5>", lambda _e: self._active().canvas.yview_scroll(3, "units"))
+        self.win.bind_all("<Button-4>", self._on_wheel)        # колесо в X11 (Linux)
+        self.win.bind_all("<Button-5>", self._on_wheel)
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         ttk.Button(self.win, text="Закрыть", command=self.close).pack(side="bottom", pady=6)
         # Первая вкладка видна сразу: её текст строится, когда ширина окна уже
@@ -1045,7 +1045,15 @@ class FormulasWindow:
         return self.tabs[self.notebook.index(self.notebook.select())]
 
     def _on_wheel(self, event):
-        self._active().canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        """Прокрутка вкладки — только над этим окном (привязка общая для всех окон)."""
+        path, win = str(event.widget), str(self.win)
+        if path != win and not path.startswith(win + "."):
+            return
+        if getattr(event, "num", None) in (4, 5):
+            step = -3 if event.num == 4 else 3
+        else:
+            step = int(-1 * (event.delta / 120)) or (-1 if event.delta > 0 else 1)
+        self._active().canvas.yview_scroll(step, "units")
 
     def close(self):
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -1122,7 +1130,7 @@ class FormulasWindow:
             color = BADGE_COLORS[block.kind]
             box = tk.Frame(frame, background=color, padx=8, pady=4)
             box.pack(fill="x", pady=4, padx=(20, 0))
-            tk.Label(box, text=block.kind, background=color, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            tk.Label(box, text=block.kind, background=color, font=desktop.SMALL_BOLD).pack(anchor="w")
             _rich_text(box, block.text, color).pack(fill="x")
         elif isinstance(block, Graph):
             _rich_text(frame, block.text, bg, font=BOLD_FONT, foreground="#1a6b2f").pack(fill="x", pady=(4, 4))
@@ -1139,7 +1147,7 @@ class FormulasWindow:
             box = tk.Frame(frame, background="#eef4fb", padx=8, pady=4)
             box.pack(fill="x", pady=4, padx=(20, 0))
             tk.Label(box, text="При текущих параметрах", background="#eef4fb",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                     font=desktop.SMALL_BOLD).pack(anchor="w")
             widget = _rich_text(box, current_text(block.key, self.app), "#eef4fb")
             widget.pack(fill="x")
             self.current_widgets.append((block.key, widget))

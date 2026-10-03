@@ -1,0 +1,48 @@
+# Сборка программы для Linux из ветки CV-VI-Linux (отдельная ветка, в main не
+# сливается). После каждого пуша в неё — или кнопкой «Run workflow» на вкладке
+# Actions — GitHub собирает программу (packaging/build_linux.sh: Docker, Ubuntu
+# 22.04), проверяет её (--check) и выкладывает на страницу релиза linux-build.
+# Скачать можно без входа в GitHub:
+#   https://github.com/neo-ovi/mesa-diode-app/releases/tag/linux-build
+# В сборке только публичный код и синтетические примеры — данных образцов нет.
+name: linux-build
+
+on:
+  push:
+    branches: [CV-VI-Linux]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # публикация релиза linux-build
+
+concurrency:
+  group: linux-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Сборка (Docker, Ubuntu 22.04)
+        run: bash packaging/build_linux.sh
+
+      - name: Проверка в чистой системе (Ubuntu 24.04, как Linux Mint 22)
+        run: |
+          mkdir folder && tar -C folder -xJf dist/MesaSimulator-linux-x86_64.tar.xz
+          for exe in /app/dist/MesaSimulator /app/folder/MesaSimulator/MesaSimulator; do
+            docker run --rm -v "$PWD:/app:ro" ubuntu:24.04 bash -c \
+              "apt-get update -qq && apt-get install -y -qq --no-install-recommends libx11-6 libfontconfig1 >/dev/null && $exe --check"
+          done
+
+      - name: Публикация на странице linux-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete linux-build --yes --cleanup-tag || true
+          gh release create linux-build \
+            dist/MesaSimulator-linux-x86_64.tar.xz dist/MesaSimulator packaging/README-Linux.txt \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Симулятор мезадиода Ge для Linux (ветка CV-VI-Linux)" \
+            --notes "Сборка коммита ${GITHUB_SHA::7} ветки CV-VI-Linux. Linux Mint 21 и новее, LMDE 6 и 7, Ubuntu 22.04+, Debian 12+. MesaSimulator-linux-x86_64.tar.xz — папка с программой (рекомендуется), MesaSimulator — то же одним файлом. Как запустить — README-Linux.txt."

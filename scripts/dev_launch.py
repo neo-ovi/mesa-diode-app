@@ -17,11 +17,14 @@
 (этот файл в .gitignore и никогда не коммитится).
 
 Запуск:  python scripts/dev_launch.py
-Либо просто дважды кликнуть launch.bat в корне репозитория.
+Либо просто дважды кликнуть launch.bat (Windows) или запустить ./launch.sh
+(Linux) в корне репозитория. В Linux нужны системные пакеты python3-venv и
+python3-tk (см. LINUX_PACKAGES).
 """
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +32,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = REPO_ROOT / ".venv"
 REQUIREMENTS = REPO_ROOT / "requirements.txt"
+LINUX_PACKAGES = "sudo apt install python3-venv python3-tk"   # Linux Mint, Ubuntu, Debian
+
+
+def linux_hint(text: str) -> str:
+    """Подсказка про системные пакеты — только в Linux."""
+    return f"{text}\nВ Linux Mint / Ubuntu / Debian: {LINUX_PACKAGES}" if sys.platform.startswith("linux") else text
 
 
 def venv_python() -> Path:
@@ -94,7 +103,16 @@ def ensure_venv() -> None:
     print("Создаю .venv...")
     result = subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)])
     if result.returncode != 0:
-        sys.exit("Не удалось создать .venv")
+        shutil.rmtree(VENV_DIR, ignore_errors=True)    # недоделанный .venv без pip — убрать
+        sys.exit(linux_hint("Не удалось создать .venv."))
+
+
+def check_tkinter() -> None:
+    """Окна программы — tkinter; venv берёт его из системного Python (в Linux —
+    отдельный пакет python3-tk, через pip он не ставится)."""
+    result = subprocess.run([str(venv_python()), "-c", "import tkinter"], capture_output=True)
+    if result.returncode != 0:
+        sys.exit(linux_hint("Нет модуля tkinter — без него окно программы не открыть."))
 
 
 def install_requirements() -> None:
@@ -108,7 +126,7 @@ def install_requirements() -> None:
 
 def launch_simulator() -> None:
     print("Запускаю симулятор...")
-    subprocess.run([str(venv_python()), "-m", "mesa_diode.simulator.app"])
+    subprocess.run([str(venv_python()), "-m", "mesa_diode.simulator.app"], cwd=REPO_ROOT)
 
 
 def main() -> None:
@@ -124,6 +142,7 @@ def main() -> None:
 
     ensure_venv()
     install_requirements()
+    check_tkinter()
     launch_simulator()
 
 

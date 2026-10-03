@@ -58,3 +58,11 @@ def test_index_markup():
     assert typeset.split_index_markup("V_{bi} и 10^{−4}") == [
         ("V", None), ("bi", "sub"), (" и 10", None), ("−4", "sup")]
     assert typeset.split_index_markup("physics.solve_iv") == [("physics.solve_iv", None)]
+
+
+def test_display_fractions_are_full_size():
+    """В выключной формуле дроби — в полный размер (displaystyle), \\dfrac не трогается."""
+    assert typeset.display(r"$\frac{kT}{q}\ln\frac{a}{b}$") == r"$\dfrac{kT}{q}\ln\dfrac{a}{b}$"
+    assert typeset.display(r"$\dfrac{a}{b}$") == r"$\dfrac{a}{b}$"
+    tex = r"$\frac{a}{b}$"
+    assert typeset.raster(typeset.display(tex), 15, 96)[0].shape[0] > typeset.raster(tex, 15, 96)[0].shape[0]

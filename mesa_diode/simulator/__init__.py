@@ -5,4 +5,4 @@
 `python scripts/run_simulator.py`, см. mesa_diode/simulator/README.md.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.7"

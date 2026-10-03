@@ -26,11 +26,11 @@ from matplotlib.mathtext import MathTextParser
 
 from mesa_diode.simulator import formulas as fm
 from mesa_diode.simulator import physics as ph
-from mesa_diode.simulator import presets
+from mesa_diode.simulator import presets, typeset
 
 MATH = MathTextParser("agg")
 FORBIDDEN = (r"\text", r"\operatorname", r"\begin")
-CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+REF = re.compile(r"^(п\. \d+[АA]?\.\d+[а-я]?|гл\. \d+[АA]?)$")
 # Формулы модели — в docstring physics.py, формулы автоподгонки (§6.7) — в fitting.py.
 PHYSICS_SOURCE = "\n".join(
     [p.read_text(encoding="utf-8") for p in sorted(Path(ph.__file__).parent.glob("*.py"))]
@@ -44,16 +44,18 @@ def _blocks(kind):
 
 def _all_tex():
     tex = [b.tex for _s, b in _blocks(fm.Formula)]
+    tex += [symbol for _s, b in _blocks(fm.Formula) for symbol, _text in b.where]
     tex += [row[0] for _s, b in _blocks(fm.Params) for row in b.rows]
     return tex
 
 
 def _all_plain():
     plain = [s.title for s in fm.SECTIONS] + [s.why for s in fm.SECTIONS]
+    plain += [p.title for p in fm.PARTS] + [p.lead for p in fm.PARTS]
     for _s, b in _blocks(fm.Text):
         plain.append(b.text)
     for _s, b in _blocks(fm.Formula):
-        plain += [b.source, b.note]
+        plain += [b.source, b.note, b.ref] + [text for _symbol, text in b.where]
     plain += [b.text for _s, b in _blocks(fm.Plaque)] + [b.text for _s, b in _blocks(fm.Graph)]
     for _s, b in _blocks(fm.Params):
         plain += [row[1] + row[2] for row in b.rows]
@@ -69,8 +71,7 @@ def test_formula_renders_with_mathtext(tex):
 @pytest.mark.parametrize("tex", _all_tex())
 def test_formula_uses_only_allowed_markup(tex):
     assert not any(cmd in tex for cmd in FORBIDDEN)
-    for math in re.findall(r"\$(.*?)\$", tex):
-        assert not CYRILLIC.search(math), tex
+    assert not typeset.cyrillic_outside_mathrm(tex), tex      # кириллица — только в \mathrm{…}
 
 
 def test_every_formula_has_source_or_badge():
@@ -99,7 +100,35 @@ def test_every_section_with_result_points_to_a_graph():
 
 def test_every_section_has_why():
     assert all(s.why.strip() for s in fm.SECTIONS)
-    assert [s.sid for s in fm.SECTIONS] == ["§0", "§1", "§2", "§3", "§4", "§5", "§5А", "§6", "§7"]
+    assert [s.sid for s in fm.SECTIONS] == (
+        [f"Б{i}" for i in range(8)] + [f"Р{i}" for i in range(9)] + [f"П{i}" for i in range(6)])
+
+
+def test_parts_go_from_simple_to_complex():
+    """Базовая → расширенная → подгонка; каждая следующая часть начинается с того,
+    что было в предыдущей."""
+    assert [p.letter for p in fm.PARTS] == ["Б", "Р", "П"]
+    letters = [s.sid[0] for s in fm.SECTIONS]
+    assert letters == sorted(letters, key="БРП".index)
+    assert "В базовой модели мы использовали" in fm.PARTS[1].lead
+    assert "В расширенной модели" in fm.PARTS[2].lead
+
+
+def test_basic_part_holds_every_formula_of_the_basic_mode():
+    """Часть Б — те формулы, по которым считает базовый режим: простой диод, схема, ВФХ, материал."""
+    basic = {b.fid for s, b in _blocks(fm.Formula) if s.sid.startswith("Б") and b.fid}
+    assert {"(6.3)", "(6.1)", "(1.1)", "(3.1)", "(3.2)", "(3.4)", "(3.5)", "(2.1)", "(2.2)", "(2.3)", "(2.4)",
+            "(2.8)", "(2.9)", "(4.4)", "(6.4)", "(6.5)"} <= basic
+    # сложное — не в базовой части
+    assert not basic & {"(3.1а)", "(4.3)", "(4.3а)", "(5.4)", "(5.9)", "(5.10)", "(6.9)", "(6.11)"}
+
+
+def test_every_numbered_formula_points_to_the_metodichka():
+    missing = [b.fid for _s, b in _blocks(fm.Formula) if b.fid and not b.ref]
+    assert missing == []
+    for _s, b in _blocks(fm.Formula):
+        for ref in filter(None, (r.strip() for r in b.ref.split(";"))):
+            assert REF.match(ref), (b.fid, ref)
 
 
 @pytest.mark.parametrize("fid", sorted(set(fm.formula_ids())))
@@ -108,8 +137,11 @@ def test_formula_id_matches_physics_docstring(fid):
 
 
 def test_formula_ids_are_unique():
-    ids = [b.fid for _s, b in _blocks(fm.Formula) if b.fid]
+    """Номер у формулы один; повтор (другая форма той же формулы) помечен repeat."""
+    ids = [b.fid for _s, b in _blocks(fm.Formula) if b.fid and not b.repeat]
     assert len(ids) == len(set(ids))
+    repeats = {b.fid for _s, b in _blocks(fm.Formula) if b.repeat}
+    assert repeats <= set(ids)
 
 
 def test_parameter_use_covers_main_window_parameters():

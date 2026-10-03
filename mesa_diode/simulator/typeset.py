@@ -61,6 +61,14 @@ def upright(tex):
     return _DESCRIPTIVE.sub(lambda m: f"{m.group(1)}{{\\mathrm{{{m.group(2)}}}}}", tex)
 
 
+_TEXT_FRACTION = re.compile(r"\\frac")      # в \dfrac перед «frac» стоит «d», а не «\»
+
+
+def display(tex):
+    """Выключная формула: дроби в полный размер (\\frac → \\dfrac), как displaystyle в TeX."""
+    return _TEXT_FRACTION.sub(r"\\dfrac", tex)
+
+
 def cyrillic_outside_mathrm(tex):
     """Кириллица вне \\mathrm{…} внутри $…$ (её не должно быть) — для тестов."""
     found = []
@@ -227,9 +235,14 @@ class RichText(tk.Frame if tk else object):
                     self.images.append(image)
                     text.image_create("end", image=image, align="center", padx=1)
         text.configure(state="disabled")
-        self.fit_height()
+        self.fit_height()       # пока ширина неизвестна, подгонку сделает <Configure>
 
     def fit_height(self, _event=None):
+        # Ширина ещё не известна (скрытая вкладка, окно не размещено): при ширине в
+        # 1–2 пикселя перенос дал бы по слову в строке, а сумма таких высот больше
+        # 32767 пикселей не помещается в окно X11. Подгонка — когда ширина появится.
+        if self.text.winfo_width() <= 2:
+            return
         # -update: Tk считает переносы строк лениво, без него высота ещё неизвестна;
         # -ypixels до "end" — высота всех строк текста.
         pixels = int(self.text.tk.call(self.text._w, "count", "-update", "-ypixels", "1.0", "end"))
@@ -280,7 +293,7 @@ def equation(parent, tex, number="", bg="#ffffff", size=DISPLAY_PT, max_width=No
     body.grid(row=0, column=column, sticky=sticky, pady=2)
     frame.math = []
     for line in lines:
-        label = MathLabel(body, line, size=size, bg=bg, max_width=max_width)
+        label = MathLabel(body, display(line), size=size, bg=bg, max_width=max_width)
         label.pack(anchor="w", pady=1)
         frame.math.append(label)
     side = tk.Frame(frame, background=bg)

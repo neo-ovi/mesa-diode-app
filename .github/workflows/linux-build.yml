@@ -36,13 +36,18 @@ jobs:
               "apt-get update -qq && apt-get install -y -qq --no-install-recommends libx11-6 libfontconfig1 >/dev/null && $exe --check"
           done
 
+      # Имена файлов — с версией и веткой кода, из которой собрано (BUILD_NAME).
       - name: Публикация на странице linux-build
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_NAME: 3.7-StepByStepLogic
         run: |
+          cp dist/MesaSimulator-linux-x86_64.tar.xz "dist/MesaSimulator-$BUILD_NAME-linux-x86_64.tar.xz"
+          cp dist/MesaSimulator "dist/MesaSimulator-$BUILD_NAME"
           gh release delete linux-build --yes --cleanup-tag || true
           gh release create linux-build \
-            dist/MesaSimulator-linux-x86_64.tar.xz dist/MesaSimulator packaging/README-Linux.txt \
+            "dist/MesaSimulator-$BUILD_NAME-linux-x86_64.tar.xz" "dist/MesaSimulator-$BUILD_NAME" \
+            packaging/README-Linux.txt \
             --prerelease --target "$GITHUB_SHA" \
-            --title "Симулятор мезадиода Ge для Linux (ветка CV-VI-Linux)" \
-            --notes "Сборка коммита ${GITHUB_SHA::7} ветки CV-VI-Linux. Linux Mint 21 и новее, LMDE 6 и 7, Ubuntu 22.04+, Debian 12+. MesaSimulator-linux-x86_64.tar.xz — папка с программой (рекомендуется), MesaSimulator — то же одним файлом. Как запустить — README-Linux.txt."
+            --title "Симулятор мезадиода Ge для Linux — версия $BUILD_NAME (ветка CV-VI-Linux)" \
+            --notes "Сборка коммита ${GITHUB_SHA::7} ветки CV-VI-Linux: код версии 3.7 (ветка CV-VI-ver.3.7-StepByStepLogic) с изменениями для Linux. Linux Mint 21 и новее, LMDE 6 и 7, Ubuntu 22.04+, Debian 12+. MesaSimulator-$BUILD_NAME-linux-x86_64.tar.xz — папка с программой (рекомендуется), MesaSimulator-$BUILD_NAME — то же одним файлом. Как запустить — README-Linux.txt."

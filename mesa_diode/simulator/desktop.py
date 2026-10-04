@@ -47,11 +47,13 @@ TEXT, BOLD = "MesaText", "MesaBold"
 SMALL, SMALL_BOLD, SMALL_ITALIC = "MesaSmall", "MesaSmallBold", "MesaSmallItalic"
 LARGE, LARGE_BOLD, LARGE_ITALIC = "MesaLarge", "MesaLargeBold", "MesaLargeItalic"
 HEADING, BIG_BOLD, TITLE, MONO = "MesaHeading", "MesaBigBold", "MesaTitle", "MesaMono"
+PART = "MesaPart"                  # заголовок части вкладки «Модель» (с версии 3.7)
 FONTS = {
     TEXT: (9, False, False, False), BOLD: (9, True, False, False),
     SMALL: (8, False, False, False), SMALL_BOLD: (8, True, False, False), SMALL_ITALIC: (8, False, True, False),
     LARGE: (10, False, False, False), LARGE_BOLD: (10, True, False, False), LARGE_ITALIC: (10, False, True, False),
     HEADING: (11, True, False, False), BIG_BOLD: (12, True, False, False), TITLE: (13, True, False, False),
+    PART: (15, True, False, False),
     MONO: (8, False, False, True),
 }
 # Стандартные шрифты Tk (кнопки, поля, меню, таблицы, диалоги): в Linux — тем же

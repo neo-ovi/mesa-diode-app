@@ -5,4 +5,4 @@
 `python scripts/run_simulator.py`, см. mesa_diode/simulator/README.md.
 """
 
-__version__ = "3.6-linux"
+__version__ = "3.7-StepByStepLogic-linux"

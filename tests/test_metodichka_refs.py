@@ -48,3 +48,33 @@ def test_error_references_point_to_headings():
         if not re.search(pattern, text, flags=re.MULTILINE):
             missing.append(ref)
     assert not missing, "нет в методичке: " + ", ".join(missing)
+
+
+def test_formula_references_point_to_headings():
+    """Сноски «Методичка: п. …» под формулами вкладки «Модель» и правой панели."""
+    import sys
+    from unittest.mock import MagicMock
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        sys.modules.setdefault("tkinter", MagicMock())
+        sys.modules.setdefault("tkinter.ttk", MagicMock())
+        sys.modules.setdefault("tkinter.font", MagicMock())
+    from mesa_diode.simulator import formulas, presets, scheme
+
+    text = _metodichka_text()
+    refs = {r.strip() for s in formulas.SECTIONS for b in s.blocks
+            if isinstance(b, formulas.Formula) for r in b.ref.split(";") if r.strip()}
+    for mode in presets.MODES:
+        s = presets.to_structure({**presets.DEFAULT_PARAMS, "mode": mode})
+        for block in scheme.panel_blocks(s, mode):
+            if isinstance(block, scheme.Eq):
+                refs |= set(re.findall(r"(?:п\. \d+[АA]?\.\d+[а-я]?|гл\. \d+[АA]?)", block.note))
+    missing = []
+    for ref in refs:
+        kind, number = ref.split(" ", 1)
+        pattern = (rf"^\*\*{re.escape(number)}[ .]" if kind == "п." else
+                   rf"^## Глава {re.escape(number)}\.")
+        if not re.search(pattern, text, flags=re.MULTILINE):
+            missing.append(ref)
+    assert not missing, "нет в методичке: " + ", ".join(sorted(missing))
